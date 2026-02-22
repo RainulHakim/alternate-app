@@ -350,6 +350,12 @@ const analyzeDiet = ({ dietText, goal }) =>
     `User's goal: ${goal}\nDiet description:\n${dietText}\nReturn ONLY the JSON.`,
     { maxTokens: 4096, model: "gemini-2.5-flash", responseMimeType: "application/json" });
 
+const analyzeDietWithImage = ({ imageData, dietText, goal }) =>
+  callAIWithImage(DIET_CHECK_SYSTEM,
+    `User's goal: ${goal}\nDiet description:\n${dietText||"(see the food image provided)"}\nAnalyze what you see and return ONLY the JSON.`,
+    imageData,
+    { maxTokens: 4096 });
+
 const fetchInsights  = ({ goal, restrictions, analyses }) =>
   callAI(INSIGHTS_SYSTEM,
     `Goal: ${goal}\nRestrictions: ${(restrictions?.tags||[]).join(", ")||"none"}\nRecent meals:\n${JSON.stringify(analyses,null,2)}\nReturn ONLY the JSON.`);
@@ -711,7 +717,7 @@ const Nav = ({page,setPage,user,onLogout,points}) => {
     return()=>window.removeEventListener("scroll",fn);
   },[]);
   const links=[{id:"home",l:"Home"},{id:"app",l:"Analyze"},
-    ...(user?[{id:"history",l:"Meal Log"},{id:"friends",l:"Friends"},{id:"insights",l:"Insights"}]:[])];
+    ...(user?[{id:"history",l:"Meal Log"},{id:"friends",l:"Leaderboard"},{id:"insights",l:"Insights"}]:[])];
   return (
     <nav style={{position:"fixed",top:0,left:0,right:0,zIndex:100,
       background:sc?"rgba(247,244,239,.94)":"transparent",
@@ -1258,24 +1264,49 @@ const ResultsView = ({result,onSave,canSave,isDemo}) => {
 ═══════════════════════════════════════════════════════════════ */
 const HistCard = ({item,onView,onCompare,onDelete}) => {
   const date=new Date(item.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+  const isDiet=item.type==="diet_check"||item.result?.type==="diet_check";
+  const dietTier=isDiet?getDietTier(item.result?.diet_score||0):null;
   return (
     <Card hover style={{padding:18,cursor:"pointer"}} onClick={()=>onView(item)}>
       <div style={{fontWeight:800,fontSize:15,marginBottom:5,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
         {item.result.title}
       </div>
       <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:12}}>
-        <Pill>{GOALS.find(g=>g.id===item.goal)?.label||item.goal}</Pill>
+        {isDiet
+          ? <Pill style={{background:"var(--sage-2xl)",color:"var(--forest)"}}>Diet Check</Pill>
+          : <Pill>{GOALS.find(g=>g.id===item.goal)?.label||item.goal}</Pill>
+        }
         <span style={{fontSize:11,color:"var(--ink-3)",fontWeight:500}}>{date}</span>
       </div>
-      <NutrientRibbon nutrition={item.result.nutrition_estimate} size="mini"/>
+      {isDiet?(
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{fontWeight:800,fontSize:22,color:dietTier?.color||"var(--forest)"}}>
+            {item.result.diet_score??"—"}
+          </div>
+          <div>
+            <div style={{fontSize:11,color:"var(--ink-3)"}}>/ 100</div>
+            <div style={{fontSize:12,fontWeight:600,color:dietTier?.color||"var(--forest)"}}>{dietTier?.emoji} {dietTier?.label}</div>
+          </div>
+          {item.result.summary&&(
+            <div style={{flex:1,fontSize:12,color:"var(--ink-2)",lineHeight:1.5,
+              overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>
+              {item.result.summary}
+            </div>
+          )}
+        </div>
+      ):(
+        <NutrientRibbon nutrition={item.result.nutrition_estimate} size="mini"/>
+      )}
       <div style={{display:"flex",justifyContent:"flex-end",gap:6,marginTop:12}}>
-        <button onClick={e=>{e.stopPropagation();onCompare(item);}}
-          style={{fontSize:11,padding:"4px 12px",border:"1.5px solid var(--cream-d)",borderRadius:"var(--rad-p)",
-            background:"transparent",color:"var(--ink-2)",cursor:"pointer",fontWeight:600,fontFamily:"var(--font)",transition:"all .18s"}}
-          onMouseEnter={e=>{e.target.style.borderColor="var(--sage)";e.target.style.color="var(--forest)";}}
-          onMouseLeave={e=>{e.target.style.borderColor="var(--cream-d)";e.target.style.color="var(--ink-2)";}}>
-          Compare
-        </button>
+        {!isDiet&&(
+          <button onClick={e=>{e.stopPropagation();onCompare(item);}}
+            style={{fontSize:11,padding:"4px 12px",border:"1.5px solid var(--cream-d)",borderRadius:"var(--rad-p)",
+              background:"transparent",color:"var(--ink-2)",cursor:"pointer",fontWeight:600,fontFamily:"var(--font)",transition:"all .18s"}}
+            onMouseEnter={e=>{e.target.style.borderColor="var(--sage)";e.target.style.color="var(--forest)";}}
+            onMouseLeave={e=>{e.target.style.borderColor="var(--cream-d)";e.target.style.color="var(--ink-2)";}}>
+            Compare
+          </button>
+        )}
         <button onClick={e=>{e.stopPropagation();onDelete(item.id);}}
           style={{fontSize:11,padding:"4px 12px",border:"1.5px solid var(--cream-d)",borderRadius:"var(--rad-p)",
             background:"transparent",color:"var(--ink-3)",cursor:"pointer",fontFamily:"var(--font)",transition:"all .18s"}}
@@ -1686,7 +1717,8 @@ const HomePage = ({setPage,onAnalyze,loading,result,onAnalyze2,loading2,result2}
 /* ═══════════════════════════════════════════════════════════════
    DIET CHECK RESULTS
 ═══════════════════════════════════════════════════════════════ */
-const DietCheckResults = ({data}) => {
+const DietCheckResults = ({data, onSave}) => {
+  const [saved,setSaved]=useState(false);
   const tier=getDietTier(data.diet_score);
   const tierColors={bad:"var(--red-s)",not_so_bad:"#c97d1a",moderate:"var(--amber)",good:"var(--forest-l)",very_good:"var(--forest)"};
   const tc=tierColors[data.tier]||"var(--forest)";
@@ -1777,7 +1809,7 @@ const DietCheckResults = ({data}) => {
 
       {/* Better day plan */}
       {data.sample_better_day&&(
-        <Card style={{padding:22}}>
+        <Card style={{padding:22,marginBottom:14}}>
           <div style={{fontSize:10,fontWeight:700,color:"var(--ink-3)",letterSpacing:".1em",textTransform:"uppercase",marginBottom:14}}>A Better Day Looks Like</div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
             {[["🌅 Breakfast",data.sample_better_day.breakfast],["☀️ Lunch",data.sample_better_day.lunch],
@@ -1796,6 +1828,16 @@ const DietCheckResults = ({data}) => {
           )}
         </Card>
       )}
+
+      {/* Save to Meal Log */}
+      {onSave&&!saved&&(
+        <div style={{display:"flex",justifyContent:"flex-end"}}>
+          <Btn variant="ghost" onClick={()=>{onSave();setSaved(true);}} style={{fontSize:13,padding:"9px 20px"}}>
+            Save to Meal Log
+          </Btn>
+        </div>
+      )}
+      {saved&&<div style={{textAlign:"right",color:"var(--forest-l)",fontSize:13,fontWeight:700,marginTop:4}}>✓ Saved to Meal Log · +10 pts</div>}
     </div>
   );
 };
@@ -1803,7 +1845,7 @@ const DietCheckResults = ({data}) => {
 /* ═══════════════════════════════════════════════════════════════
    APP PAGE
 ═══════════════════════════════════════════════════════════════ */
-const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,defaultTab}) => {
+const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,onSaveDiet,defaultTab}) => {
   const [appTab,setAppTab]=useState(defaultTab||"meal"); // "meal" | "diet"
   const [compareMode,setCompareMode]=useState(false);
   const [result2,setResult2]=useState(null);
@@ -1817,6 +1859,10 @@ const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,defaultTab})
   const [dietLoading,setDietLoading]=useState(false);
   const [dietErr,setDietErr]=useState("");
   const [dietPtsEarned,setDietPtsEarned]=useState(false);
+  // Diet camera state
+  const [dietImgPreview,setDietImgPreview]=useState(null);
+  const [dietImgData,setDietImgData]=useState(null);
+  const dietFileRef=useRef(null);
 
   const handleAnalyze2=async(input)=>{
     if(!input.mealText?.trim()&&!input.imageData) return;
@@ -1839,15 +1885,31 @@ const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,defaultTab})
   };
 
   const submitDiet=async()=>{
-    if(!dietText.trim()){setDietErr("Please describe what you eat in a day or week.");return;}
+    if(!dietText.trim()&&!dietImgData){setDietErr("Describe your diet or upload a food photo.");return;}
     setDietErr("");setDietLoading(true);setDietResult(null);
     try {
-      const r=await analyzeDiet({dietText:dietText.trim(),goal:dietGoal});
+      const r=dietImgData
+        ? await analyzeDietWithImage({imageData:dietImgData,dietText:dietText.trim(),goal:dietGoal})
+        : await analyzeDiet({dietText:dietText.trim(),goal:dietGoal});
       setDietResult(r);
       if(!dietPtsEarned){setDietPtsEarned(true);onDietPoints&&onDietPoints();}
     } catch(e){ setDietErr(e.message||"Analysis failed."); }
     finally { setDietLoading(false); }
   };
+
+  const handleDietFile=e=>{
+    const file=e.target.files?.[0];
+    if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      const dataUrl=ev.target.result;
+      setDietImgPreview(dataUrl);
+      setDietImgData({base64:dataUrl.split(",")[1],mimeType:file.type});
+    };
+    reader.readAsDataURL(file);
+    e.target.value="";
+  };
+  const clearDietImg=()=>{setDietImgPreview(null);setDietImgData(null);};
 
   const isMeal=appTab==="meal";
 
@@ -1998,9 +2060,37 @@ const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,defaultTab})
                 rows={7}
                 style={{width:"100%",padding:"14px 16px",border:`1.5px solid ${dietErr?"var(--red-s)":"var(--cream-d)"}`,
                   borderRadius:"var(--rad)",fontFamily:"var(--font)",fontSize:14,color:"var(--ink)",
-                  background:"var(--cream)",resize:"vertical",outline:"none",lineHeight:1.7,marginBottom:14}}
+                  background:"var(--cream)",resize:"vertical",outline:"none",lineHeight:1.7,marginBottom:10}}
                 onFocus={e=>e.target.style.borderColor="var(--forest-l)"}
                 onBlur={e=>e.target.style.borderColor=dietErr?"var(--red-s)":"var(--cream-d)"}/>
+
+              {/* Camera / photo upload */}
+              <div style={{marginBottom:16}}>
+                {dietImgPreview?(
+                  <div style={{position:"relative",display:"inline-block"}}>
+                    <img src={dietImgPreview} alt="diet preview"
+                      style={{maxHeight:140,maxWidth:"100%",borderRadius:"var(--rad)",objectFit:"cover",
+                        border:"2px solid var(--sage-l)"}}/>
+                    <button onClick={clearDietImg}
+                      style={{position:"absolute",top:6,right:6,width:24,height:24,borderRadius:"50%",
+                        border:"none",background:"rgba(0,0,0,.55)",color:"#fff",fontSize:14,cursor:"pointer",
+                        display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>✕</button>
+                  </div>
+                ):(
+                  <button onClick={()=>dietFileRef.current?.click()}
+                    style={{display:"inline-flex",alignItems:"center",gap:7,padding:"8px 16px",
+                      border:"1.5px dashed var(--cream-dd)",borderRadius:"var(--rad)",background:"transparent",
+                      color:"var(--ink-3)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"var(--font)",
+                      transition:"all .18s"}}
+                    onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--sage)";e.currentTarget.style.color="var(--forest)";}}
+                    onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--cream-dd)";e.currentTarget.style.color="var(--ink-3)";}}>
+                    📷 Add a food photo (optional)
+                  </button>
+                )}
+                <input ref={dietFileRef} type="file" accept="image/*" capture="environment"
+                  onChange={handleDietFile} style={{display:"none"}}/>
+              </div>
+
               <FieldLabel mt={2}>Your Goal</FieldLabel>
               <div style={{display:"flex",gap:3,background:"var(--cream)",borderRadius:"var(--rad)",padding:3,
                 boxShadow:"inset 0 1px 3px rgba(0,0,0,.05)",marginBottom:18}}>
@@ -2021,7 +2111,7 @@ const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,defaultTab})
               {dietPtsEarned&&<div style={{marginTop:10,fontSize:13,color:"var(--forest-l)",fontWeight:700,textAlign:"center"}}>✓ +20 pts earned for your diet check!</div>}
             </Card>
             {dietLoading&&!dietResult&&<Skeleton/>}
-            {dietResult&&<DietCheckResults data={dietResult}/>}
+            {dietResult&&<DietCheckResults data={dietResult} onSave={user?()=>onSaveDiet(dietResult):null}/>}
           </div>
         )}
       </div>
@@ -2686,7 +2776,7 @@ const FriendsPage = ({history, user, points}) => {
             Social Competition
           </div>
           <h1 style={{fontWeight:800,fontSize:"clamp(28px,4vw,40px)",color:"var(--white)",letterSpacing:"-.03em",marginBottom:6,lineHeight:1.1}}>
-            Friends Leaderboard
+            Leaderboard
           </h1>
           <p style={{color:"rgba(255,255,255,.55)",fontSize:14,marginBottom:28}}>
             Weekly health scores. The better you eat, the higher you climb.
@@ -2818,8 +2908,39 @@ const FriendsPage = ({history, user, points}) => {
           </Card>
         </div>
 
+        {/* Points card */}
+        <Card style={{padding:22,marginTop:8,marginBottom:8}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:10}}>
+            <div>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--ink-3)",letterSpacing:".1em",textTransform:"uppercase",marginBottom:4}}>Your Points</div>
+              <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                <span style={{fontWeight:800,fontSize:36,color:"var(--forest)",lineHeight:1}}>{points}</span>
+                <span style={{fontSize:13,color:"var(--ink-3)",fontWeight:500}}>pts total</span>
+              </div>
+            </div>
+            <div style={{padding:"10px 16px",background:"var(--sage-2xl)",borderRadius:"var(--rad)",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"var(--forest)",fontWeight:600}}>This week</div>
+              <div style={{fontWeight:800,fontSize:20,color:"var(--forest)"}}>{userScore}/100</div>
+              <div style={{fontSize:11,color:"var(--ink-3)"}}>{myTier.emoji} {myTier.label}</div>
+            </div>
+          </div>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--ink-3)",letterSpacing:".09em",textTransform:"uppercase",marginBottom:10}}>How to Earn Points</div>
+          <div style={{display:"grid",gap:0,borderRadius:"var(--rad)",overflow:"hidden",border:"1px solid var(--cream-d)"}}>
+            {[["Save a meal analysis","📊","+10 pts"],["Complete a diet check","📋","+20 pts"],
+              ["Log 5+ meals in a week","🔥","+25 bonus"],["Weekly health score ≥ 80","🏆","+50 bonus"]].map(([action,icon,pts],i,arr)=>(
+              <div key={action} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 16px",
+                background:i%2===0?"var(--white)":"var(--cream)",
+                borderBottom:i<arr.length-1?"1px solid var(--cream-d)":"none"}}>
+                <span style={{fontSize:18,flexShrink:0}}>{icon}</span>
+                <span style={{flex:1,fontSize:13,color:"var(--ink-2)"}}>{action}</span>
+                <span style={{fontWeight:800,fontSize:14,color:"var(--forest)",flexShrink:0}}>{pts}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
         {/* Score tip */}
-        <div style={{marginTop:20,padding:"14px 18px",background:"var(--sage-2xl)",borderRadius:"var(--rad)",
+        <div style={{marginTop:8,padding:"14px 18px",background:"var(--sage-2xl)",borderRadius:"var(--rad)",
           fontSize:13,color:"var(--forest)",lineHeight:1.65}}>
           <strong>Tip:</strong> Log meals and complete diet checks to improve your score and climb the leaderboard. Score updates every week.
         </div>
@@ -2989,6 +3110,25 @@ export default function App() {
     showToast("🥗 +20 pts for completing a diet check!");
   },[showToast]);
 
+  const handleSaveDiet = useCallback((dietResult)=>{
+    if(!user||!dietResult) return;
+    const tier=getDietTier(dietResult.diet_score||0);
+    const entry={id:Date.now().toString(),user_id:user.id,
+      meal_text:"Diet Check",goal:"balance",
+      restrictions:{tags:[]},type:"diet_check",
+      result:{title:`Diet Check · ${tier.emoji} ${tier.label}`,
+        diet_score:dietResult.diet_score,tier:dietResult.tier,
+        summary:dietResult.summary,type:"diet_check"},
+      created_at:new Date().toISOString()};
+    const next=[entry,...history];
+    setHistory(next);saveHistory(next);
+    const pts=loadPoints();
+    const newTotal=(pts.total||0)+10;
+    savePoints({...pts,total:newTotal});
+    setPoints(newTotal);
+    showToast("✓ Diet check saved to Meal Log · +10 pts");
+  },[user,history,showToast]);
+
   const handleScoreBonus = useCallback(()=>{
     const pts=loadPoints();
     const newTotal=(pts.total||0)+50;
@@ -3016,7 +3156,7 @@ export default function App() {
           onAnalyze={v=>handleAnalyze(v,true)} loading={loading} result={homeRes}
           onAnalyze2={handleAnalyzeHome2} loading2={homeLd2} result2={homeRes2}/>}
       {(page==="app"||page==="app:diet") && <AppPage key={page==="app:diet"?"diet":"meal"} user={user} onAnalyze={v=>handleAnalyze(v,false)} loading={loading} result={result} onSave={handleSave}
-          onDietPoints={handleDietPoints} defaultTab={page==="app:diet"?"diet":"meal"}/>}
+          onDietPoints={handleDietPoints} onSaveDiet={handleSaveDiet} defaultTab={page==="app:diet"?"diet":"meal"}/>}
       {page==="history"  && (user?<HistoryPage history={history} setHistory={setHistory} showToast={showToast}
           settings={settings} onView={item=>{setResult(item.result);setPage("app");}}/>:<Gate label="meal log" setPage={setPage}/>)}
       {page==="friends"  && (user?<FriendsPage history={history} user={user} points={points}/>:<Gate label="friends leaderboard" setPage={setPage}/>)}
