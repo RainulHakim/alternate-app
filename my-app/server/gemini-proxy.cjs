@@ -10,7 +10,7 @@ const fetch = require('node-fetch');
 const bodyParser = require('body-parser');
 
 const app = express();
-app.use(bodyParser.json({ limit: '1mb' }));
+app.use(bodyParser.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 5174;
 // Trim and strip BOM so key from file is valid
@@ -24,13 +24,18 @@ if (!GEMINI_KEY) {
 app.post('/api/gemini', async (req, res) => {
   if (!GEMINI_KEY) return res.status(500).json({ error: 'Server misconfigured: GEMINI_API_KEY missing' });
   try {
-    const { model, system, prompt, responseMimeType, maxTokens } = req.body;
+    const { model, system, prompt, responseMimeType, maxTokens, imageData } = req.body;
     // Gemini API: support both header and query key (some setups require query param)
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`;
+    // Build parts array — add image inline data if provided
+    const parts = [{ text: system ? `${system}\n\n${prompt}` : prompt }];
+    if (imageData && imageData.base64 && imageData.mimeType) {
+      parts.push({ inline_data: { mime_type: imageData.mimeType, data: imageData.base64 } });
+    }
     const requestBody = {
       contents: [{
         role: 'user',
-        parts: [{ text: system ? `${system}\n\n${prompt}` : prompt }]
+        parts
       }],
       generationConfig: {
         temperature: 0.2,

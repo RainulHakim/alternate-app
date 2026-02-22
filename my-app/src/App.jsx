@@ -145,15 +145,71 @@ Schema:
 {
   "title":"string",
   "overview":{"one_liner":"string","good_news":["","",""],"watch_out":["","",""],"why_it_matters":"string"},
-  "nutrition_estimate":{"calories":n,"protein_g":n,"carbs_g":n,"fat_g":n,"fiber_g":n,"sugar_g":n,"sodium_mg":n},
+  "nutrition_estimate":{"serving_size":"string","calories":n,"protein_g":n,"carbs_g":n,"fat_g":n,"fiber_g":n,"sugar_g":n,"sodium_mg":n},
   "flags":[{"type":"string","severity":"low|medium|high","note":"string"}],
   "alternatives":[{"name":"string","vibe_preserved":"string","why_better":"string","swap_steps":["","",""],
-    "nutrition_estimate":{"calories":n,"protein_g":n,"carbs_g":n,"fat_g":n,"fiber_g":n,"sugar_g":n,"sodium_mg":n}}],
+    "nutrition_estimate":{"serving_size":"string","calories":n,"protein_g":n,"carbs_g":n,"fat_g":n,"fiber_g":n,"sugar_g":n,"sodium_mg":n}}],
+  "best_alternative_index":0,
+  "comparison":{"verdict_title":"string","verdict_summary":"string","tradeoffs":["","",""],"recommendation":"string"},
+  "confidence_notes":"string","disclaimer":"string"
+}
+Provide exactly 3 alternatives. serving_size must be a realistic, common portion e.g. "1 medium bowl (400g)", "2 slices (150g)", "1 cup (240ml)". All nutrition values must correspond to this serving size. Return ONLY the JSON object.`;
+
+const IMAGE_ANALYZE_SYSTEM = `You are AlternAte, a practical meal analysis assistant.
+Analyze the food or restaurant menu shown in the image.
+If it is food: identify the dish name and estimate nutrition for the most common serving size.
+If it is a restaurant menu: identify the single healthiest item that fits common goals, use it as the main meal.
+Return ONLY a single valid JSON object — no markdown fences, no prose, no extra text.
+Never give medical advice. Use: "may support", "often associated with", "can contribute to".
+serving_size must be a realistic, common portion e.g. "1 bowl (350g)", "1 slice (120g)".
+Schema:
+{
+  "title":"string",
+  "overview":{"one_liner":"string","good_news":["","",""],"watch_out":["","",""],"why_it_matters":"string"},
+  "nutrition_estimate":{"serving_size":"string","calories":n,"protein_g":n,"carbs_g":n,"fat_g":n,"fiber_g":n,"sugar_g":n,"sodium_mg":n},
+  "flags":[{"type":"string","severity":"low|medium|high","note":"string"}],
+  "alternatives":[{"name":"string","vibe_preserved":"string","why_better":"string","swap_steps":["","",""],
+    "nutrition_estimate":{"serving_size":"string","calories":n,"protein_g":n,"carbs_g":n,"fat_g":n,"fiber_g":n,"sugar_g":n,"sodium_mg":n}}],
   "best_alternative_index":0,
   "comparison":{"verdict_title":"string","verdict_summary":"string","tradeoffs":["","",""],"recommendation":"string"},
   "confidence_notes":"string","disclaimer":"string"
 }
 Provide exactly 3 alternatives. Return ONLY the JSON object.`;
+
+const WEEKLY_SUGGESTION_SYSTEM = `You are AlternAte's weekly nutrition advisor.
+The user has been eating too much of certain nutrients this week.
+Suggest one specific corrective meal that would help balance their diet.
+Return ONLY a single valid JSON object — no markdown fences, no prose.
+Schema:
+{"headline":"string","suggestion_meal":"string","why":"string","nutrients_it_balances":["string"],"easy_to_make":true}
+Return ONLY the JSON object.`;
+
+const DIET_CHECK_SYSTEM = `You are AlternAte's full diet analyzer.
+The user describes their typical daily or weekly eating pattern.
+Analyze it holistically and return ONLY a single valid JSON object.
+No markdown fences, no prose, no extra text. No medical claims. Use hedged language.
+Score the diet 0-100 based on: sodium control, sugar control, fiber intake, protein balance, variety, calorie balance.
+Tier: bad(0-20), not_so_bad(21-40), moderate(41-60), good(61-80), very_good(81-100).
+food_suggestions must be exactly 3 specific real foods/dishes (not generic "eat more vegetables").
+sample_better_day must be specific real meals.
+Schema:
+{
+  "diet_score":0,
+  "tier":"bad|not_so_bad|moderate|good|very_good",
+  "summary":"string",
+  "whats_working":["string","string","string"],
+  "whats_missing":["string","string","string"],
+  "whats_excessive":["string","string"],
+  "food_suggestions":[
+    {"food":"string","why":"string","easy_to_add":"string"},
+    {"food":"string","why":"string","easy_to_add":"string"},
+    {"food":"string","why":"string","easy_to_add":"string"}
+  ],
+  "sample_better_day":{"breakfast":"string","lunch":"string","dinner":"string","snack":"string"},
+  "confidence_notes":"string",
+  "disclaimer":"string"
+}
+Return ONLY the JSON object.`;
 
 const INSIGHTS_SYSTEM = `You are AlternAte's pattern intelligence engine.
 Analyze the user's recent meal history and return ONLY a single valid JSON object.
@@ -231,6 +287,46 @@ const callAI = async (systemPrompt, userPrompt, opts = {}) => {
   } catch (e) { throw new Error("AI response malformed. Please try again. " + (e?.message||"")); }
 };
 
+// callAIWithImage: like callAI but attaches a base64 image for Gemini Vision
+const callAIWithImage = async (systemPrompt, userPrompt, imageData, opts = {}) => {
+  const payload = {
+    model: opts.model || "gemini-2.5-flash",  // vision requires full model, not flash-lite
+    system: systemPrompt,
+    prompt: userPrompt,
+    responseMimeType: "application/json",
+    maxTokens: opts.maxTokens || 2048,
+    imageData,
+  };
+  const res = await fetch("/api/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed (${res.status})`);
+  }
+  const data = await res.json();
+  const raw = (data.text || data.output || "") + "";
+  const start = raw.indexOf("{");
+  if (start === -1) throw new Error("No JSON in response. Please try again.");
+  let depth = 0, end = -1;
+  for (let i = start; i < raw.length; i++) {
+    if (raw[i] === "{") depth++;
+    else if (raw[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  const jsonStr = end > -1 ? raw.slice(start, end + 1) : raw.slice(start);
+  try { return JSON.parse(jsonStr); } catch (_) {}
+  try {
+    let f = jsonStr.replace(/,\s*$/, "");
+    const ob = (f.match(/\{/g)||[]).length - (f.match(/\}/g)||[]).length;
+    const ab = (f.match(/\[/g)||[]).length - (f.match(/\]/g)||[]).length;
+    for (let i = 0; i < ab; i++) f += "]";
+    for (let i = 0; i < ob; i++) f += "}";
+    return JSON.parse(f);
+  } catch (e) { throw new Error("AI response malformed. Please try again. " + (e?.message||"")); }
+};
+
 /*
   PRODUCTION: replace these with fetch("/api/analyze", ...) etc.
   The callAI() function above is the demo stand-in.
@@ -238,6 +334,21 @@ const callAI = async (systemPrompt, userPrompt, opts = {}) => {
 const analyzeMeal    = ({ mealText, goal, restrictions }) =>
   callAI(ANALYZE_SYSTEM,
     `Analyze: "${mealText}"\nGoal: ${goal}\nRestrictions: ${(restrictions?.tags||[]).join(", ")||"none"}\nReturn ONLY the JSON.`);
+
+const analyzeImageMeal = ({ imageData, goal, restrictions }) =>
+  callAIWithImage(IMAGE_ANALYZE_SYSTEM,
+    `Analyze the food in this image.\nGoal: ${goal}\nRestrictions: ${(restrictions?.tags||[]).join(", ")||"none"}\nReturn ONLY the JSON.`,
+    imageData);
+
+const fetchWeeklySuggestion = (alerts, goal) =>
+  callAI(WEEKLY_SUGGESTION_SYSTEM,
+    `Nutrients over limit this week: ${JSON.stringify(alerts)}\nUser goal: ${goal}\nReturn ONLY the JSON.`,
+    { maxTokens: 512 });
+
+const analyzeDiet = ({ dietText, goal }) =>
+  callAI(DIET_CHECK_SYSTEM,
+    `User's goal: ${goal}\nDiet description:\n${dietText}\nReturn ONLY the JSON.`,
+    { maxTokens: 4096, model: "gemini-2.5-flash", responseMimeType: "application/json" });
 
 const fetchInsights  = ({ goal, restrictions, analyses }) =>
   callAI(INSIGHTS_SYSTEM,
@@ -250,12 +361,91 @@ const fetchCompare   = ({ analysisA, analysisB, goal, restrictions }) =>
 /* ═══════════════════════════════════════════════════════════════
    LOCAL STORAGE
 ═══════════════════════════════════════════════════════════════ */
-const LS_KEY   = "alternate_v3";
-const LS_DONE  = "alternate_challenges_done";
+const LS_KEY    = "alternate_v3";
+const LS_DONE   = "alternate_challenges_done";
+const LS_PTS    = "alternate_points_v1";
 const loadHistory  = () => { try { return JSON.parse(localStorage.getItem(LS_KEY))||[]; } catch (e) { return []; } };
 const saveHistory  = l  => { try { localStorage.setItem(LS_KEY, JSON.stringify(l.slice(0,40))); } catch (e) { /* ignore */ } };
 const loadDone     = () => { try { return JSON.parse(localStorage.getItem(LS_DONE))||[]; } catch (e) { return []; } };
 const saveDone     = d  => { try { localStorage.setItem(LS_DONE, JSON.stringify(d)); } catch (e) { /* ignore */ } };
+const loadPoints   = () => { try { return JSON.parse(localStorage.getItem(LS_PTS))||{total:0,badges:[]}; } catch (e) { return {total:0,badges:[]}; } };
+const savePoints   = p  => { try { localStorage.setItem(LS_PTS, JSON.stringify(p)); } catch (e) { /* ignore */ } };
+
+/* ═══════════════════════════════════════════════════════════════
+   WEEKLY NUTRITION HELPERS
+═══════════════════════════════════════════════════════════════ */
+const getLastWeekAnalyses = (history) => {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  return history.filter(a => new Date(a.created_at).getTime() > cutoff);
+};
+
+const getWeeklyAlerts = (weekAnalyses) => {
+  if (weekAnalyses.length < 3) return [];
+  const totals = {calories:0,protein_g:0,carbs_g:0,fat_g:0,fiber_g:0,sugar_g:0,sodium_mg:0};
+  weekAnalyses.forEach(a => {
+    const n = a.result?.nutrition_estimate || {};
+    Object.keys(totals).forEach(k => { totals[k] += (n[k] || 0); });
+  });
+  const count = weekAnalyses.length;
+  const avg = {};
+  Object.keys(totals).forEach(k => avg[k] = totals[k] / count);
+  const alerts = [];
+  if (avg.sodium_mg > 1800) alerts.push({nutrient:"Sodium",emoji:"🧂",avg:Math.round(avg.sodium_mg),unit:"mg",limit:1500,tip:"Too much sodium raises blood pressure."});
+  if (avg.sugar_g > 45)    alerts.push({nutrient:"Sugar",emoji:"🍬",avg:Math.round(avg.sugar_g),unit:"g",limit:30,tip:"Excess sugar contributes to energy crashes and weight gain."});
+  if (avg.carbs_g > 110)   alerts.push({nutrient:"Carbs",emoji:"🌾",avg:Math.round(avg.carbs_g),unit:"g",limit:75,tip:"High carb intake may spike blood sugar."});
+  if (avg.fat_g > 68)      alerts.push({nutrient:"Fat",emoji:"🫒",avg:Math.round(avg.fat_g),unit:"g",limit:50,tip:"Watch saturated fat to protect heart health."});
+  if (avg.fiber_g < 5)     alerts.push({nutrient:"Fiber",emoji:"🌿",avg:Math.round(avg.fiber_g),unit:"g",limit:8,tip:"Low fiber hurts digestion and gut health.",isLow:true});
+  return alerts;
+};
+
+const DIET_TIERS = [
+  {min:81,max:100,label:"Very Good",emoji:"💚",color:"var(--forest-l)",desc:"Excellent! You're a nutrition role model."},
+  {min:61,max:80, label:"Good",     emoji:"🟢",color:"var(--forest)",  desc:"Strong habits! Keep it up."},
+  {min:41,max:60, label:"Moderate", emoji:"🟡",color:"var(--amber)",   desc:"Decent foundation — a few tweaks go far."},
+  {min:21,max:40, label:"Not so bad",emoji:"🟠",color:"#c97d1a",       desc:"Some good choices, but room to grow."},
+  {min:0, max:20, label:"Bad",      emoji:"🔴",color:"var(--red-s)",   desc:"Your diet needs serious attention."},
+];
+const getDietTier = (score) => DIET_TIERS.find(t => score >= t.min && score <= t.max) || DIET_TIERS[4];
+
+const MOCK_FRIENDS = [
+  {name:"Alex K.",   emoji:"🧑", score:84, meals:12, streak:6, lastActivity:"logged a grain bowl",        activityTime:"1h ago",  pts:"+10"},
+  {name:"Priya S.",  emoji:"👩", score:71, meals:9,  streak:4, lastActivity:"completed a diet check",     activityTime:"3h ago",  pts:"+20"},
+  {name:"Jordan T.", emoji:"🧔", score:63, meals:7,  streak:3, lastActivity:"saved their 5th meal",       activityTime:"yesterday",pts:"+25"},
+  {name:"Sam W.",    emoji:"🧕", score:55, meals:5,  streak:2, lastActivity:"analyzed a chicken wrap",    activityTime:"yesterday",pts:"+10"},
+  {name:"Chris L.",  emoji:"👦", score:38, meals:3,  streak:1, lastActivity:"analyzed a burger and fries",activityTime:"2d ago",  pts:"+10"},
+];
+
+const calculateHealthScore = (weekAnalyses) => {
+  if (!weekAnalyses.length) return null;
+  const totals = {protein_g:0,fiber_g:0,sugar_g:0,sodium_mg:0,fat_g:0,calories:0};
+  weekAnalyses.forEach(a => {
+    const n = a.result?.nutrition_estimate || {};
+    Object.keys(totals).forEach(k => { totals[k] += (n[k] || 0); });
+  });
+  const count = weekAnalyses.length;
+  const avg = {};
+  Object.keys(totals).forEach(k => avg[k] = totals[k] / count);
+
+  // Sodium Control (25 pts)
+  const sodium = avg.sodium_mg < 1000 ? 25 : avg.sodium_mg < 1500 ? 18 : avg.sodium_mg < 2000 ? 10 : 0;
+  // Sugar Control (20 pts)
+  const sugar  = avg.sugar_g < 20 ? 20 : avg.sugar_g < 35 ? 14 : avg.sugar_g < 50 ? 7 : 0;
+  // Fiber Intake (20 pts)
+  const fiber  = avg.fiber_g > 10 ? 20 : avg.fiber_g > 7 ? 14 : avg.fiber_g > 4 ? 8 : 2;
+  // Protein Balance (15 pts)
+  const protein = avg.protein_g > 35 ? 15 : avg.protein_g > 25 ? 10 : avg.protein_g > 15 ? 5 : 0;
+  // Meal Variety (10 pts)
+  const unique = new Set(weekAnalyses.map(a => a.meal_text?.toLowerCase())).size;
+  const variety = (unique / Math.max(count,1)) >= 0.7 ? 10 : (unique / Math.max(count,1)) >= 0.5 ? 6 : 2;
+  // Calorie Balance (10 pts)
+  const calorie = (avg.calories >= 400 && avg.calories <= 800) ? 10 : (avg.calories >= 300 && avg.calories <= 1000) ? 6 : 2;
+
+  const overall = Math.min(100, sodium + sugar + fiber + protein + variety + calorie);
+  return {
+    overall, sodium, sugar, fiber, protein, variety, calorie,
+    count, avg
+  };
+};
 
 /* ═══════════════════════════════════════════════════════════════
    CONSTANTS
@@ -513,7 +703,7 @@ const Logo = ({onClick,light=false}) => (
 /* ═══════════════════════════════════════════════════════════════
    NAV
 ═══════════════════════════════════════════════════════════════ */
-const Nav = ({page,setPage,user,onLogout}) => {
+const Nav = ({page,setPage,user,onLogout,points}) => {
   const [sc,setSc]=useState(false);
   useEffect(()=>{
     const fn=()=>setSc(window.scrollY>20);
@@ -521,7 +711,7 @@ const Nav = ({page,setPage,user,onLogout}) => {
     return()=>window.removeEventListener("scroll",fn);
   },[]);
   const links=[{id:"home",l:"Home"},{id:"app",l:"Analyze"},
-    ...(user?[{id:"history",l:"History"},{id:"insights",l:"Insights"},{id:"settings",l:"Settings"}]:[])];
+    ...(user?[{id:"history",l:"Meal Log"},{id:"friends",l:"Friends"},{id:"insights",l:"Insights"}]:[])];
   return (
     <nav style={{position:"fixed",top:0,left:0,right:0,zIndex:100,
       background:sc?"rgba(247,244,239,.94)":"transparent",
@@ -531,15 +721,24 @@ const Nav = ({page,setPage,user,onLogout}) => {
       display:"flex",alignItems:"center",justifyContent:"space-between"}}>
       <Logo onClick={()=>setPage("home")}/>
       <div style={{display:"flex",gap:2,alignItems:"center"}}>
-        {links.map(({id,l})=>(
+        {links.map(({id,l})=>{
+          const isActive=page===id||(id==="app"&&page==="app:diet");
+          return (
           <button key={id} onClick={()=>setPage(id)} style={{
-            fontFamily:"var(--font)",fontSize:14,fontWeight:page===id?700:500,
-            color:page===id?"var(--forest)":"var(--ink-2)",
+            fontFamily:"var(--font)",fontSize:14,fontWeight:isActive?700:500,
+            color:isActive?"var(--forest)":"var(--ink-2)",
             background:"transparent",border:"none",cursor:"pointer",
             padding:"6px 12px",borderRadius:8,transition:"color .18s"}}>
             {l}
           </button>
-        ))}
+          );
+        })}
+        {user&&points>0&&(
+          <div style={{fontSize:12,fontWeight:700,color:"var(--amber)",background:"var(--amber-l)",
+            padding:"4px 10px",borderRadius:"var(--rad-p)",marginLeft:4,letterSpacing:".01em"}}>
+            ⭐ {points}
+          </div>
+        )}
         {user?(
           <button onClick={onLogout} style={{fontFamily:"var(--font)",fontSize:13,fontWeight:600,
             padding:"7px 16px",border:"1.5px solid var(--cream-dd)",borderRadius:"var(--rad-p)",
@@ -563,19 +762,48 @@ const MealInputCard = ({onAnalyze,loading}) => {
   const [restr,setRestr]=useState([]);
   const [shake,setShake]=useState(false);
   const [err,setErr]=useState("");
+  const [imgPreview,setImgPreview]=useState(null);
+  const [imgData,setImgData]=useState(null);
+  const [imgLoading,setImgLoading]=useState(false);
+  const fileRef=useRef(null);
   const toggle=r=>setRestr(p=>p.includes(r)?p.filter(x=>x!==r):[...p,r]);
   const submit=()=>{
     if(!meal.trim()){setShake(true);setErr("Please describe your meal or food.");setTimeout(()=>setShake(false),500);return;}
     if(meal.length>2000){setErr("Too long — max 2000 chars.");return;}
     setErr("");onAnalyze({mealText:meal.trim(),goal,restrictions:{tags:restr}});
   };
+  const handleFileChange=async(e)=>{
+    const file=e.target.files?.[0];
+    if(!file) return;
+    if(!file.type.startsWith("image/")){setErr("Please select an image file.");return;}
+    setImgLoading(true);setErr("");
+    const reader=new FileReader();
+    reader.onload=async(ev)=>{
+      const dataUrl=ev.target.result;
+      const base64=dataUrl.split(",")[1];
+      setImgPreview(dataUrl);
+      setImgData({base64,mimeType:file.type});
+      setImgLoading(false);
+    };
+    reader.onerror=()=>{setErr("Could not read image.");setImgLoading(false);};
+    reader.readAsDataURL(file);
+    e.target.value="";
+  };
+  const analyzeImage=async()=>{
+    if(!imgData) return;
+    setErr("");
+    try {
+      onAnalyze({imageData:imgData,goal,restrictions:{tags:restr}});
+    } catch(e){ setErr(e.message||"Image analysis failed."); }
+  };
+  const clearImage=()=>{setImgPreview(null);setImgData(null);};
   return (
     <Card style={{padding:28}}>
       <div style={{position:"relative"}}>
         <textarea value={meal} onChange={e=>{setMeal(e.target.value);setErr("");}}
           placeholder="Type any food, drink, or meal… e.g. Pepsi, beef ramen, paneer curry, shawarma wrap"
           rows={4} maxLength={2000}
-          style={{width:"100%",padding:"14px 16px",
+          style={{width:"100%",padding:"14px 16px",paddingRight:48,
             border:`1.5px solid ${err?"var(--red-s)":"var(--cream-d)"}`,
             borderRadius:"var(--rad)",fontFamily:"var(--font)",fontSize:15,
             color:"var(--ink)",background:"var(--cream)",resize:"none",outline:"none",lineHeight:1.65,
@@ -584,11 +812,44 @@ const MealInputCard = ({onAnalyze,loading}) => {
           onBlur={e=>e.target.style.borderColor=err?"var(--red-s)":"var(--cream-d)"}/>
         <span style={{position:"absolute",bottom:10,right:12,fontSize:10,
           color:meal.length>1800?"var(--red-s)":"var(--ink-3)",fontWeight:500}}>{meal.length}/2000</span>
+        {/* Camera button */}
+        <button onClick={()=>fileRef.current?.click()}
+          title="Analyze food from photo"
+          style={{position:"absolute",top:10,right:10,width:32,height:32,border:"1.5px solid var(--cream-d)",
+            borderRadius:8,background:"var(--white)",cursor:"pointer",display:"flex",alignItems:"center",
+            justifyContent:"center",fontSize:16,transition:"all .18s",zIndex:2}}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--sage)";e.currentTarget.style.background="var(--sage-2xl)";}}
+          onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--cream-d)";e.currentTarget.style.background="var(--white)";}}>
+          📷
+        </button>
+        <input ref={fileRef} type="file" accept="image/*" capture="environment"
+          onChange={handleFileChange} style={{display:"none"}}/>
       </div>
+      {/* Image preview */}
+      {(imgPreview||imgLoading)&&(
+        <div style={{marginTop:10,display:"flex",alignItems:"center",gap:10,padding:"10px 14px",
+          background:"var(--sage-2xl)",borderRadius:"var(--rad)"}}>
+          {imgLoading?(
+            <div style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:"var(--forest-l)"}}>
+              <Spinner size={16} color="var(--forest-l)"/>Reading image…
+            </div>
+          ):(
+            <>
+              <img src={imgPreview} alt="food" style={{width:64,height:64,borderRadius:8,objectFit:"cover",flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:600,color:"var(--forest)",marginBottom:4}}>Image ready</div>
+                <div style={{fontSize:12,color:"var(--forest-l)"}}>Click below to analyze with AI vision</div>
+              </div>
+              <button onClick={clearImage} style={{background:"none",border:"none",cursor:"pointer",
+                fontSize:18,color:"var(--ink-3)",lineHeight:1,padding:"0 4px"}}>×</button>
+            </>
+          )}
+        </div>
+      )}
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10,alignItems:"center"}}>
         <span style={{fontSize:11,color:"var(--ink-3)",fontWeight:700,letterSpacing:".06em",textTransform:"uppercase"}}>Try:</span>
         {EXAMPLES.map(ex=>(
-          <button key={ex} onClick={()=>{setMeal(ex);setErr("");}}
+          <button key={ex} onClick={()=>{setMeal(ex);setErr("");clearImage();}}
             style={{fontFamily:"var(--font)",fontSize:12,padding:"4px 12px",border:"1.5px solid var(--cream-d)",
               borderRadius:"var(--rad-p)",background:"var(--cream)",color:"var(--ink-2)",cursor:"pointer",transition:"all .18s",fontWeight:500}}
             onMouseEnter={e=>{e.target.style.background="var(--sage-2xl)";e.target.style.color="var(--forest)";e.target.style.borderColor="var(--sage-l)";}}
@@ -621,9 +882,15 @@ const MealInputCard = ({onAnalyze,loading}) => {
         </div>
       </div>
       {err&&<div style={{marginTop:10,fontSize:13,color:"var(--red-s)",fontWeight:500}}>{err}</div>}
-      <Btn loading={loading} onClick={submit} style={{width:"100%",marginTop:20,fontSize:15,padding:"15px",justifyContent:"center"}}>
-        {loading?"Analyzing with AI…":"Analyze Meal →"}
-      </Btn>
+      {imgData?(
+        <Btn loading={loading} onClick={analyzeImage} style={{width:"100%",marginTop:20,fontSize:15,padding:"15px",justifyContent:"center"}}>
+          {loading?"Analyzing image with AI…":"Analyze Photo →"}
+        </Btn>
+      ):(
+        <Btn loading={loading} onClick={submit} style={{width:"100%",marginTop:20,fontSize:15,padding:"15px",justifyContent:"center"}}>
+          {loading?"Analyzing with AI…":"Analyze Meal →"}
+        </Btn>
+      )}
     </Card>
   );
 };
@@ -652,20 +919,31 @@ const Skeleton = () => (
 /* ═══════════════════════════════════════════════════════════════
    NUTRITION BAR
 ═══════════════════════════════════════════════════════════════ */
-const NutritionBar = ({label,value,unit,max,color,icon}) => {
+const NutritionBar = ({label,value,unit,max,color,icon,healthy,healthyLabel="Healthy limit"}) => {
   const pct=max>0?Math.min((value/max)*100,100):0;
+  const healthyPct=healthy&&max>0?Math.min((healthy/max)*100,100):null;
+  const over=healthy&&value!=null&&value>healthy;
   return (
-    <div style={{marginBottom:16}}>
+    <div style={{marginBottom:18}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
         <span style={{fontSize:14,color:"var(--ink-2)",display:"flex",alignItems:"center",gap:6}}>
           {icon&&<span style={{fontSize:15}}>{icon}</span>}{label}
         </span>
-        <span style={{fontWeight:700,fontSize:14,color:"var(--ink)"}}>
-          {value!=null?`${value}${unit}`:<span style={{opacity:.4}}>—</span>}
-        </span>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {over&&<span style={{fontSize:10,fontWeight:700,color:"var(--amber)",background:"var(--amber-l)",padding:"2px 7px",borderRadius:"var(--rad-p)"}}>Above limit</span>}
+          <span style={{fontWeight:700,fontSize:14,color:over?"var(--amber)":"var(--ink)"}}>
+            {value!=null?`${value}${unit}`:<span style={{opacity:.4}}>—</span>}
+          </span>
+        </div>
       </div>
-      <div style={{height:7,background:"var(--cream-d)",borderRadius:"var(--rad-p)",overflow:"hidden"}}>
-        <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:"var(--rad-p)",animation:"barGrow .75s var(--ease) both"}}/>
+      <div style={{position:"relative",height:7,background:"var(--cream-d)",borderRadius:"var(--rad-p)",overflow:"visible"}}>
+        <div style={{height:"100%",width:`${pct}%`,background:over?"var(--amber)":color,borderRadius:"var(--rad-p)",animation:"barGrow .75s var(--ease) both",overflow:"hidden"}}/>
+        {healthyPct!=null&&(
+          <div style={{position:"absolute",top:-14,left:`${healthyPct}%`,transform:"translateX(-50%)",pointerEvents:"none"}}>
+            <div style={{fontSize:8,fontWeight:700,color:"var(--forest-l)",whiteSpace:"nowrap",letterSpacing:".03em",textAlign:"center",marginBottom:2}}>{healthyLabel}</div>
+            <div style={{width:2,height:22,background:"var(--forest-l)",opacity:.5,margin:"0 auto",borderRadius:1}}/>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -831,8 +1109,11 @@ const ComparePanel = ({result}) => {
 const ResultsView = ({result,onSave,canSave,isDemo}) => {
   const [tab,setTab]=useState("overview");
   const [saved,setSaved]=useState(false);
+  const [qty,setQty]=useState(1);
   const ov=result.overview||{};
   const n=result.nutrition_estimate||{};
+  const sc=v=>v!=null?Math.round(v*qty):null;
+  const qtyLabel=qty===1?"":` ×${qty}`;
   return (
     <div style={{animation:"expand .5s var(--ease) both",overflow:"hidden"}}>
       {isDemo&&(
@@ -844,14 +1125,32 @@ const ResultsView = ({result,onSave,canSave,isDemo}) => {
       <Card style={{padding:24,marginBottom:12}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:16}}>
           <div style={{flex:1}}>
-            <div style={{fontWeight:800,fontSize:26,lineHeight:1.15,marginBottom:6}}>{result.title}</div>
+            <div style={{fontWeight:800,fontSize:26,lineHeight:1.15,marginBottom:4}}>{result.title}</div>
+            {/* Serving size + quantity adjuster */}
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,flexWrap:"wrap"}}>
+              {n.serving_size&&(
+                <span style={{fontSize:12,color:"var(--ink-3)",fontWeight:500}}>
+                  Per: <strong style={{color:"var(--ink-2)"}}>{n.serving_size}</strong>
+                </span>
+              )}
+              <div style={{display:"flex",alignItems:"center",gap:4,background:"var(--cream)",borderRadius:"var(--rad-p)",padding:"2px 4px",border:"1.5px solid var(--cream-d)"}}>
+                <button onClick={()=>setQty(q=>Math.max(0.25,+(q-0.25).toFixed(2)))}
+                  style={{width:24,height:24,border:"none",borderRadius:"var(--rad-p)",background:"transparent",
+                    cursor:"pointer",fontWeight:700,fontSize:15,color:"var(--ink-2)",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+                <span style={{fontSize:12,fontWeight:700,minWidth:28,textAlign:"center",color:"var(--forest)"}}>{qty}×</span>
+                <button onClick={()=>setQty(q=>Math.min(5,+(q+0.25).toFixed(2)))}
+                  style={{width:24,height:24,border:"none",borderRadius:"var(--rad-p)",background:"transparent",
+                    cursor:"pointer",fontWeight:700,fontSize:15,color:"var(--ink-2)",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+              </div>
+              {qty!==1&&<span style={{fontSize:11,color:"var(--sage)",fontWeight:600}}>Nutrition scaled {qty}×</span>}
+            </div>
             <div style={{color:"var(--ink-2)",fontSize:15,marginBottom:16,lineHeight:1.7,maxWidth:580}}>{ov.one_liner}</div>
             <NutrientRibbon nutrition={n}/>
           </div>
           {n.calories!=null&&(
             <div style={{textAlign:"center",background:"var(--cream)",padding:"12px 18px",borderRadius:"var(--rad)",flexShrink:0}}>
-              <div style={{fontWeight:800,fontSize:28,color:"var(--forest)",lineHeight:1}}>{n.calories}</div>
-              <div style={{fontSize:11,color:"var(--ink-3)",fontWeight:600,marginTop:2}}>kcal</div>
+              <div style={{fontWeight:800,fontSize:28,color:"var(--forest)",lineHeight:1}}>{sc(n.calories)}</div>
+              <div style={{fontSize:11,color:"var(--ink-3)",fontWeight:600,marginTop:2}}>kcal{qtyLabel}</div>
             </div>
           )}
         </div>
@@ -912,14 +1211,17 @@ const ResultsView = ({result,onSave,canSave,isDemo}) => {
         )}
         {tab==="breakdown"&&(
           <div>
-            <div style={{fontWeight:800,fontSize:18,marginBottom:20}}>Nutrition Estimate</div>
-            <NutritionBar label="Calories"      icon="⚡" value={n.calories}  unit=" kcal" max={900}  color="var(--forest)"/>
-            <NutritionBar label="Protein"       icon="💪" value={n.protein_g} unit="g"     max={60}   color="var(--forest-l)"/>
-            <NutritionBar label="Carbohydrates" icon="🌾" value={n.carbs_g}   unit="g"     max={130}  color="var(--sage)"/>
-            <NutritionBar label="Fat"           icon="🫒" value={n.fat_g}     unit="g"     max={80}   color="var(--sage-l)"/>
-            <NutritionBar label="Fiber"         icon="🌿" value={n.fiber_g}   unit="g"     max={30}   color="var(--sage)"/>
-            <NutritionBar label="Sugar"         icon="🍬" value={n.sugar_g}   unit="g"     max={60}   color="var(--ink-3)"/>
-            <NutritionBar label="Sodium"        icon="🧂" value={n.sodium_mg} unit="mg"    max={2300} color="var(--ink-3)"/>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontWeight:800,fontSize:18}}>Nutrition Estimate</div>
+              {n.serving_size&&<span style={{fontSize:12,color:"var(--ink-3)"}}>Per {qty!==1?`${qty}× `:""}serving{qty!==1?` (${n.serving_size})`:` — ${n.serving_size}`}</span>}
+            </div>
+            <NutritionBar label="Calories"      icon="⚡" value={sc(n.calories)}  unit=" kcal" max={900*qty}  color="var(--forest)"   healthy={600*qty}/>
+            <NutritionBar label="Protein"       icon="💪" value={sc(n.protein_g)} unit="g"     max={60*qty}   color="var(--forest-l)"/>
+            <NutritionBar label="Carbohydrates" icon="🌾" value={sc(n.carbs_g)}   unit="g"     max={130*qty}  color="var(--sage)"     healthy={75*qty}/>
+            <NutritionBar label="Fat"           icon="🫒" value={sc(n.fat_g)}     unit="g"     max={80*qty}   color="var(--sage-l)"   healthy={50*qty}/>
+            <NutritionBar label="Fiber"         icon="🌿" value={sc(n.fiber_g)}   unit="g"     max={30*qty}   color="var(--sage)"     healthy={8*qty}  healthyLabel="Daily goal"/>
+            <NutritionBar label="Sugar"         icon="🍬" value={sc(n.sugar_g)}   unit="g"     max={60*qty}   color="var(--ink-3)"    healthy={25*qty}/>
+            <NutritionBar label="Sodium"        icon="🧂" value={sc(n.sodium_mg)} unit="mg"    max={2300*qty} color="var(--ink-3)"    healthy={920*qty}/>
             <div style={{marginTop:24}}>
               <div style={{fontWeight:800,fontSize:18,marginBottom:16}}>Flags</div>
               <FlagsPanel flags={result.flags}/>
@@ -942,11 +1244,11 @@ const ResultsView = ({result,onSave,canSave,isDemo}) => {
       {canSave&&!saved&&(
         <div style={{marginTop:12,display:"flex",justifyContent:"flex-end"}}>
           <Btn variant="ghost" onClick={()=>{onSave();setSaved(true);}} style={{fontSize:13,padding:"9px 20px"}}>
-            Save Analysis
+            Save to Meal Log
           </Btn>
         </div>
       )}
-      {saved&&<div style={{marginTop:12,textAlign:"right",color:"var(--forest-l)",fontSize:13,fontWeight:700}}>✓ Saved to history</div>}
+      {saved&&<div style={{marginTop:12,textAlign:"right",color:"var(--forest-l)",fontSize:13,fontWeight:700}}>✓ Saved to Meal Log · +10 pts</div>}
     </div>
   );
 };
@@ -987,6 +1289,94 @@ const HistCard = ({item,onView,onCompare,onDelete}) => {
 };
 
 /* ═══════════════════════════════════════════════════════════════
+   COMPARE MEAL INPUT  (two fields, one shared button)
+═══════════════════════════════════════════════════════════════ */
+const CompareMealInput = ({onAnalyzeA, onAnalyzeB, loading}) => {
+  const [mealA,setMealA]=useState("");
+  const [mealB,setMealB]=useState("");
+  const [goal,setGoal]=useState("balance");
+  const [restr,setRestr]=useState([]);
+  const [err,setErr]=useState("");
+  const toggle=r=>setRestr(p=>p.includes(r)?p.filter(x=>x!==r):[...p,r]);
+
+  const submit=()=>{
+    if(!mealA.trim()&&!mealB.trim()){setErr("Describe both meals to compare.");return;}
+    if(!mealA.trim()){setErr("Please describe Meal A.");return;}
+    if(!mealB.trim()){setErr("Please describe Meal B.");return;}
+    setErr("");
+    onAnalyzeA({mealText:mealA.trim(),goal,restrictions:{tags:restr}});
+    onAnalyzeB({mealText:mealB.trim(),goal,restrictions:{tags:restr}});
+  };
+
+  const taStyle={width:"100%",padding:"12px 14px",border:"1.5px solid var(--cream-d)",
+    borderRadius:"var(--rad)",fontFamily:"var(--font)",fontSize:14,
+    color:"var(--ink)",background:"var(--cream)",resize:"none",outline:"none",
+    lineHeight:1.6,transition:"border-color .2s"};
+
+  return (
+    <Card style={{padding:22}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:16}}>
+        {[{label:"Meal A",badge:"var(--forest)",val:mealA,set:setMealA,ph:"e.g. Beef ramen with egg…"},
+          {label:"Meal B",badge:"var(--sage)",  val:mealB,set:setMealB,ph:"e.g. Grilled chicken salad…"}
+        ].map(({label,badge,val,set,ph})=>(
+          <div key={label}>
+            <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}>
+              <div style={{width:22,height:22,borderRadius:"50%",background:badge,flexShrink:0,
+                display:"flex",alignItems:"center",justifyContent:"center",
+                fontWeight:800,fontSize:11,color:"var(--white)"}}>
+                {label.slice(-1)}
+              </div>
+              <span style={{fontSize:11,fontWeight:700,color:"var(--ink-3)",letterSpacing:".08em",textTransform:"uppercase"}}>{label}</span>
+            </div>
+            <textarea value={val} rows={4} placeholder={ph}
+              onChange={e=>{set(e.target.value);setErr("");}}
+              style={taStyle}
+              onFocus={e=>e.target.style.borderColor="var(--forest-l)"}
+              onBlur={e=>e.target.style.borderColor="var(--cream-d)"}/>
+          </div>
+        ))}
+      </div>
+
+      <div style={{marginBottom:14}}>
+        <FieldLabel>Goal — applies to both</FieldLabel>
+        <div style={{display:"flex",gap:3,background:"var(--cream)",borderRadius:"var(--rad)",padding:3,
+          boxShadow:"inset 0 1px 3px rgba(0,0,0,.05)"}}>
+          {GOALS.map(g=>(
+            <button key={g.id} onClick={()=>setGoal(g.id)}
+              style={{flex:1,padding:"7px 6px",borderRadius:10,border:"none",cursor:"pointer",
+                fontFamily:"var(--font)",fontSize:12,fontWeight:goal===g.id?700:500,
+                background:goal===g.id?"var(--white)":"transparent",
+                color:goal===g.id?"var(--forest)":"var(--ink-2)",
+                boxShadow:goal===g.id?"var(--sh-s)":"none",transition:"all .2s"}}>{g.label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{marginBottom:14}}>
+        <FieldLabel>Dietary Restrictions</FieldLabel>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+          {RESTRICTIONS.map(r=>{const a=restr.includes(r);return(
+            <button key={r} onClick={()=>toggle(r)}
+              style={{fontFamily:"var(--font)",fontSize:12,padding:"4px 11px",
+                border:`1.5px solid ${a?"var(--sage)":"var(--cream-d)"}`,borderRadius:"var(--rad-p)",
+                cursor:"pointer",fontWeight:a?700:500,
+                background:a?"var(--sage-2xl)":"transparent",
+                color:a?"var(--forest-l)":"var(--ink-2)",transition:"all .18s"}}>{r}</button>
+          );})}
+        </div>
+      </div>
+
+      {err&&<div style={{fontSize:13,color:"var(--red-s)",fontWeight:500,marginBottom:10}}>{err}</div>}
+
+      <Btn loading={loading} onClick={submit}
+        style={{width:"100%",fontSize:15,padding:"14px",justifyContent:"center"}}>
+        Analyze Both Meals →
+      </Btn>
+    </Card>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
    STAT NUM (animated counter)
 ═══════════════════════════════════════════════════════════════ */
 const StatNum = ({target,suffix="",dur=1600}) => {
@@ -998,11 +1388,23 @@ const StatNum = ({target,suffix="",dur=1600}) => {
 /* ═══════════════════════════════════════════════════════════════
    HOME PAGE
 ═══════════════════════════════════════════════════════════════ */
-const HomePage = ({setPage,onAnalyze,loading,result}) => {
+const HomePage = ({setPage,onAnalyze,loading,result,onAnalyze2,loading2,result2}) => {
   const [sRef,sVis]=useVis(.18);
   const [gRef,gVis]=useVis(.1);
   const [hRef,hVis]=useVis(.1);
   const [iRef,iVis]=useVis(.1);
+  const [compareMode,setCompareMode]=useState(false);
+  const [homeCmpVerdict,setHomeCmpVerdict]=useState(null);
+  const [homeCmpVLoading,setHomeCmpVLoading]=useState(false);
+  const generateHomeCmpVerdict=async()=>{
+    if(!result||!result2) return;
+    setHomeCmpVLoading(true);
+    try {
+      const v=await fetchCompare({analysisA:{result},analysisB:{result:result2},goal:"balance",restrictions:{tags:[]}});
+      setHomeCmpVerdict(v);
+    } catch(e){ /* ignore */ }
+    finally { setHomeCmpVLoading(false); }
+  };
   return (
     <div>
       <section style={{position:"relative",minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-start",
@@ -1011,34 +1413,106 @@ const HomePage = ({setPage,onAnalyze,loading,result}) => {
         <div style={{maxWidth:640,margin:"0 auto",width:"100%",position:"relative",zIndex:1,
           display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center"}}>
           <div>
-            <div style={{animation:"fadeUp .7s .05s both"}}><Pill size="md">AI-Powered Meal Analysis</Pill></div>
+            <div style={{animation:"fadeUp .7s .05s both"}}><Pill size="md">AI-Powered Nutrition Intelligence</Pill></div>
             <h1 style={{fontWeight:800,fontSize:"clamp(38px,5vw,66px)",lineHeight:1.06,letterSpacing:"-.03em",
               marginTop:20,marginBottom:22,animation:"fadeUp .7s .15s both"}}>
-              Eat what you love.<br/><span style={{color:"var(--forest-l)"}}>Eat it smarter.</span>
+              Know your food.<br/><span style={{color:"var(--forest-l)"}}>Own your health.</span>
             </h1>
-            <p style={{fontSize:16,color:"var(--ink-2)",lineHeight:1.75,maxWidth:440,marginBottom:34,marginLeft:"auto",marginRight:"auto",
+            <p style={{fontSize:16,color:"var(--ink-2)",lineHeight:1.75,maxWidth:460,marginBottom:34,marginLeft:"auto",marginRight:"auto",
               animation:"fadeUp .7s .25s both"}}>
-              Type any food, drink, or meal. Get a practical AI analysis and 3 smarter alternatives — without the lecture.
+              Analyze meals, check your full diet, earn points for eating well, and compete with friends on the leaderboard.
             </p>
             <div style={{display:"flex",gap:12,flexWrap:"wrap",justifyContent:"center",animation:"fadeUp .7s .35s both"}}>
-              <Btn onClick={()=>setPage("app")}>Analyze a Meal</Btn>
+              <Btn onClick={()=>setPage("app:diet")}>Check My Diet</Btn>
               <Btn variant="ghost" onClick={()=>document.getElementById("how")?.scrollIntoView({behavior:"smooth"})}>
                 How it works ↓
               </Btn>
             </div>
             <div style={{display:"flex",gap:28,marginTop:38,paddingTop:28,borderTop:"1px solid var(--cream-d)",justifyContent:"center",animation:"fadeUp .7s .45s both"}}>
-              {[["350 kcal","avg daily reduction"],["3×","more protein possible"],["78%","love the taste too"]].map(([n,l])=>(
+              {[["⭐ Points","earn for healthy choices"],["🏆 Leaderboard","compete with friends"],["📊 Diet Score","track weekly progress"]].map(([n,l])=>(
                 <div key={n}>
-                  <div style={{fontWeight:800,fontSize:22,color:"var(--forest-l)",lineHeight:1}}>{n}</div>
-                  <div style={{fontSize:11,color:"var(--ink-3)",marginTop:4,lineHeight:1.4,maxWidth:90}}>{l}</div>
+                  <div style={{fontWeight:800,fontSize:18,color:"var(--forest-l)",lineHeight:1}}>{n}</div>
+                  <div style={{fontSize:11,color:"var(--ink-3)",marginTop:4,lineHeight:1.4,maxWidth:100}}>{l}</div>
                 </div>
               ))}
             </div>
           </div>
         </div>
-        <div style={{maxWidth:520,margin:"0 auto",width:"100%",position:"relative",zIndex:1,marginTop:48,animation:"fadeUp .7s .2s both"}}>
-          <MealInputCard onAnalyze={onAnalyze} loading={loading}/>
-          {result&&<div style={{marginTop:18}}><ResultsView result={result} canSave={false} isDemo onSave={()=>{}}/></div>}
+        <div style={{width:"100%",position:"relative",zIndex:1,
+          maxWidth:compareMode?840:520,margin:"48px auto 0",
+          transition:"max-width .45s var(--ease)"}}>
+
+          {/* Input area */}
+          {compareMode?(
+            <div style={{animation:"fadeUp .35s both"}}>
+              <CompareMealInput
+                onAnalyzeA={onAnalyze} onAnalyzeB={onAnalyze2}
+                loading={loading||loading2}/>
+            </div>
+          ):(
+            <MealInputCard onAnalyze={onAnalyze} loading={loading}/>
+          )}
+
+          {/* Results */}
+          {(result||result2)&&compareMode?(
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginTop:18}}>
+              <div>{result&&<ResultsView result={result} canSave={false} isDemo onSave={()=>{}}/>}</div>
+              <div>{result2&&<ResultsView result={result2} canSave={false} isDemo onSave={()=>{}}/>}</div>
+            </div>
+          ):(
+            result&&!compareMode&&<div style={{marginTop:18}}><ResultsView result={result} canSave={false} isDemo onSave={()=>{}}/></div>
+          )}
+
+          {/* Compare toggle */}
+          <div style={{textAlign:"center",marginTop:14}}>
+            <button onClick={()=>{setCompareMode(c=>!c);setHomeCmpVerdict(null);}}
+              style={{fontFamily:"var(--font)",fontSize:12,fontWeight:600,
+                padding:"7px 18px",borderRadius:"var(--rad-p)",cursor:"pointer",
+                border:`1.5px solid ${compareMode?"var(--sage-l)":"var(--cream-dd)"}`,
+                background:compareMode?"var(--sage-2xl)":"rgba(255,255,255,.75)",
+                color:compareMode?"var(--forest)":"var(--ink-3)",
+                backdropFilter:"blur(8px)",transition:"all .2s",
+                display:"inline-flex",alignItems:"center",gap:6}}>
+              <span style={{fontSize:14}}>{compareMode?"✕":"⇄"}</span>
+              {compareMode?"Back to single meal":"Compare two meals"}
+            </button>
+          </div>
+
+          {/* Verdict */}
+          {compareMode&&result&&result2&&(
+            <div style={{marginTop:20,animation:"fadeUp .5s both"}}>
+              <Card style={{padding:22}}>
+                <div style={{fontWeight:800,fontSize:15,marginBottom:12,textAlign:"center"}}>
+                  {result.title} <span style={{color:"var(--ink-3)",fontWeight:400}}>vs.</span> {result2.title}
+                </div>
+                {!homeCmpVerdict?(
+                  <div style={{textAlign:"center"}}>
+                    <Btn loading={homeCmpVLoading} onClick={generateHomeCmpVerdict} style={{fontSize:13,padding:"9px 22px"}}>
+                      Get AI Verdict →
+                    </Btn>
+                  </div>
+                ):(
+                  <div style={{animation:"fadeUp .4s both"}}>
+                    {homeCmpVerdict.verdict_title&&(
+                      <div style={{textAlign:"center",marginBottom:10}}>
+                        <div style={{display:"inline-flex",alignItems:"center",gap:8,background:"var(--forest)",
+                          color:"var(--white)",padding:"8px 18px",borderRadius:"var(--rad-p)",fontWeight:700,fontSize:13}}>
+                          ★ {homeCmpVerdict.verdict_title}
+                        </div>
+                      </div>
+                    )}
+                    {homeCmpVerdict.verdict_summary&&<div style={{fontSize:14,color:"var(--ink-2)",lineHeight:1.65,marginBottom:10,textAlign:"center"}}>{homeCmpVerdict.verdict_summary}</div>}
+                    {homeCmpVerdict.recommendation&&(
+                      <div style={{padding:"10px 14px",background:"var(--sage-2xl)",borderRadius:"var(--rad)",
+                        fontSize:13,color:"var(--forest)",fontWeight:600,lineHeight:1.6,textAlign:"center"}}>
+                        {homeCmpVerdict.recommendation}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </Card>
+            </div>
+          )}
         </div>
       </section>
 
@@ -1125,11 +1599,11 @@ const HomePage = ({setPage,onAnalyze,loading,result}) => {
             </p>
           </div>
           <div style={{display:"flex",flexDirection:"column",gap:3}}>
-            {[{n:"01",t:"Make swaps effortless",d:"Suggestions that fit your existing life — not a different one."},
-              {n:"02",t:"Preserve the vibe",d:"Same comfort, same craving — better ingredients behind the scenes."},
-              {n:"03",t:"Clarity without judgment",d:"Practical info, zero guilt, no medical claims."},
-              {n:"04",t:"Respect restrictions & culture",d:"Your dietary needs and food traditions are honoured."},
-              {n:"05",t:"Make comparison fast",d:"Side-by-side analysis so you decide in seconds."},
+            {[{n:"01",t:"Diet Analyzer",d:"Drop what you eat in a day — AI scores it, finds gaps, and suggests real improvements in seconds."},
+              {n:"02",t:"Meal-by-meal analysis",d:"Type or photo any meal and get 3 smarter swaps that fit your goal without losing the taste."},
+              {n:"03",t:"Weekly health score",d:"An objective 0–100 score based on your actual eating habits — not guesswork."},
+              {n:"04",t:"Friends leaderboard",d:"See how your score stacks up and use friendly competition as your motivation to eat better."},
+              {n:"05",t:"Camera scan",d:"Point your camera at any food and let AI identify it and analyze its nutrition instantly."},
             ].map((g,i)=>(
               <div key={i} style={{padding:"18px 22px",
                 borderLeft:`3px solid ${gVis?"var(--sage-l)":"transparent"}`,
@@ -1159,24 +1633,26 @@ const HomePage = ({setPage,onAnalyze,loading,result}) => {
             <div style={{fontSize:10,fontWeight:700,color:"var(--sage-l)",letterSpacing:".14em",textTransform:"uppercase",marginBottom:12}}>Simple by design</div>
             <h2 style={{fontWeight:800,fontSize:"clamp(26px,4vw,52px)",color:"var(--white)",lineHeight:1.1,letterSpacing:"-.025em"}}>How it works</h2>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)"}}>
-            {[{n:"01",t:"Enter your food",d:"Type any meal, drink, or ingredient list from any cuisine. No special format."},
-              {n:"02",t:"Set your goal",d:"Choose balance, more protein, lower carbs, or more energy."},
-              {n:"03",t:"Get smarter swaps",d:"AI returns 3 alternatives that preserve the taste and improve the nutrition."},
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))"}}>
+            {[{n:"01",t:"Drop your diet or scan a meal",d:"Paste what you eat in a day, or type / photo a single meal — any format works."},
+              {n:"02",t:"AI scores and analyzes it",d:"Get a detailed breakdown of what's working, what's missing, and what's excessive."},
+              {n:"03",t:"Get smarter suggestions",d:"Specific food swaps and additions tailored to your goal — not generic advice."},
+              {n:"04",t:"Track your weekly score",d:"Watch your 0–100 health score improve over time as you log more meals."},
+              {n:"05",t:"Compete on the leaderboard",d:"Earn points, rank up among friends, and use competition as your daily motivator."},
             ].map((s,i)=>(
-              <div key={i} style={{padding:"44px 32px",
-                borderRight:i<2?"1px solid rgba(255,255,255,.07)":"none",
+              <div key={i} style={{padding:"36px 28px",
+                borderRight:i<4?"1px solid rgba(255,255,255,.07)":"none",
                 opacity:hVis?1:0,transform:hVis?"none":"translateY(20px)",
-                transition:`all .5s ${.1+i*.15}s var(--ease)`}}>
-                <div style={{fontWeight:700,fontSize:32,color:"rgba(255,255,255,.1)",lineHeight:1,marginBottom:16}}>{s.n}</div>
-                <div style={{fontWeight:800,fontSize:20,color:"var(--white)",marginBottom:10}}>{s.t}</div>
-                <div style={{fontSize:14,color:"rgba(255,255,255,.55)",lineHeight:1.7}}>{s.d}</div>
+                transition:`all .5s ${.08+i*.12}s var(--ease)`}}>
+                <div style={{fontWeight:700,fontSize:28,color:"rgba(255,255,255,.1)",lineHeight:1,marginBottom:14}}>{s.n}</div>
+                <div style={{fontWeight:800,fontSize:17,color:"var(--white)",marginBottom:8,lineHeight:1.3}}>{s.t}</div>
+                <div style={{fontSize:13,color:"rgba(255,255,255,.55)",lineHeight:1.7}}>{s.d}</div>
               </div>
             ))}
           </div>
           <div style={{marginTop:52,textAlign:"center",opacity:hVis?1:0,transition:"opacity .5s .5s"}}>
-            <Btn onClick={()=>setPage("app")} style={{background:"var(--sage)",color:"var(--forest)"}}>
-              Start Analyzing →
+            <Btn onClick={()=>setPage("app:diet")} style={{background:"var(--sage)",color:"var(--forest)"}}>
+              Check My Diet →
             </Btn>
           </div>
         </div>
@@ -1208,34 +1684,359 @@ const HomePage = ({setPage,onAnalyze,loading,result}) => {
 };
 
 /* ═══════════════════════════════════════════════════════════════
+   DIET CHECK RESULTS
+═══════════════════════════════════════════════════════════════ */
+const DietCheckResults = ({data}) => {
+  const tier=getDietTier(data.diet_score);
+  const tierColors={bad:"var(--red-s)",not_so_bad:"#c97d1a",moderate:"var(--amber)",good:"var(--forest-l)",very_good:"var(--forest)"};
+  const tc=tierColors[data.tier]||"var(--forest)";
+  return (
+    <div style={{animation:"expand .5s var(--ease) both",overflow:"hidden"}}>
+      {/* Score + Tier */}
+      <Card style={{padding:28,marginBottom:14}}>
+        <div style={{display:"flex",gap:24,alignItems:"center",flexWrap:"wrap"}}>
+          {/* Ring */}
+          <div style={{textAlign:"center",flexShrink:0}}>
+            <div style={{position:"relative",width:100,height:100}}>
+              <svg width="100" height="100" viewBox="0 0 100 100" style={{transform:"rotate(-90deg)"}}>
+                <circle cx="50" cy="50" r="40" fill="none" stroke="var(--cream-d)" strokeWidth="9"/>
+                <circle cx="50" cy="50" r="40" fill="none" stroke={tc} strokeWidth="9"
+                  strokeLinecap="round"
+                  strokeDasharray={`${data.diet_score*2.513} 251.3`}
+                  style={{transition:"stroke-dasharray .9s var(--ease)"}}/>
+              </svg>
+              <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+                <div style={{fontWeight:800,fontSize:26,lineHeight:1,color:tc}}>{data.diet_score}</div>
+                <div style={{fontSize:9,color:"var(--ink-3)",fontWeight:600,textTransform:"uppercase",letterSpacing:".04em"}}>/100</div>
+              </div>
+            </div>
+            <div style={{marginTop:8,fontWeight:800,fontSize:15,color:tc}}>{tier.emoji} {tier.label}</div>
+            <div style={{fontSize:12,color:"var(--ink-3)",marginTop:3,maxWidth:120,lineHeight:1.4}}>{tier.desc}</div>
+          </div>
+          {/* Summary */}
+          <div style={{flex:1,minWidth:200}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".1em",textTransform:"uppercase",marginBottom:8}}>Diet Summary</div>
+            <div style={{fontSize:15,color:"var(--ink-2)",lineHeight:1.75}}>{data.summary}</div>
+          </div>
+        </div>
+        <div style={{fontSize:11,color:"var(--ink-3)",marginTop:16,lineHeight:1.6}}>{data.disclaimer||"Estimates only · Not medical advice"}</div>
+      </Card>
+
+      {/* What's working / missing / excessive */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+        <Card style={{padding:20}}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--forest-l)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:12}}>What's Working</div>
+          {(data.whats_working||[]).map((w,i)=>(
+            <div key={i} style={{display:"flex",gap:8,marginBottom:8,fontSize:13,lineHeight:1.6}}>
+              <span style={{color:"var(--sage)",fontWeight:700,flexShrink:0}}>✓</span>
+              <span style={{color:"var(--ink-2)"}}>{w}</span>
+            </div>
+          ))}
+        </Card>
+        <Card style={{padding:20}}>
+          {(data.whats_excessive||[]).length>0&&(
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--amber)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:8}}>Too Much Of</div>
+              {data.whats_excessive.map((w,i)=>(
+                <div key={i} style={{display:"flex",gap:8,marginBottom:6,fontSize:13,lineHeight:1.55}}>
+                  <span style={{color:"var(--amber)",flexShrink:0}}>▲</span>
+                  <span style={{color:"var(--ink-2)"}}>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(data.whats_missing||[]).length>0&&(
+            <div>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--red-s)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:8}}>Missing</div>
+              {data.whats_missing.map((w,i)=>(
+                <div key={i} style={{display:"flex",gap:8,marginBottom:6,fontSize:13,lineHeight:1.55}}>
+                  <span style={{color:"var(--red-s)",flexShrink:0}}>▼</span>
+                  <span style={{color:"var(--ink-2)"}}>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* Food suggestions */}
+      {(data.food_suggestions||[]).length>0&&(
+        <Card style={{padding:22,marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".1em",textTransform:"uppercase",marginBottom:14}}>Add These to Your Diet</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12}}>
+            {data.food_suggestions.map((s,i)=>(
+              <div key={i} style={{background:"var(--sage-2xl)",borderRadius:"var(--rad)",padding:"14px 16px"}}>
+                <div style={{fontWeight:800,fontSize:14,color:"var(--forest)",marginBottom:4}}>{s.food}</div>
+                <div style={{fontSize:12,color:"var(--forest-l)",lineHeight:1.55,marginBottom:8}}>{s.why}</div>
+                <div style={{fontSize:11,color:"var(--ink-3)",fontStyle:"italic"}}>How: {s.easy_to_add}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Better day plan */}
+      {data.sample_better_day&&(
+        <Card style={{padding:22}}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--ink-3)",letterSpacing:".1em",textTransform:"uppercase",marginBottom:14}}>A Better Day Looks Like</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+            {[["🌅 Breakfast",data.sample_better_day.breakfast],["☀️ Lunch",data.sample_better_day.lunch],
+              ["🌙 Dinner",data.sample_better_day.dinner],["🍎 Snack",data.sample_better_day.snack]].map(([label,val])=>val&&(
+              <div key={label} style={{background:"var(--cream)",borderRadius:"var(--rad)",padding:"12px 14px"}}>
+                <div style={{fontSize:11,fontWeight:700,color:"var(--ink-3)",marginBottom:5}}>{label}</div>
+                <div style={{fontSize:13,color:"var(--ink)",lineHeight:1.55,fontWeight:500}}>{val}</div>
+              </div>
+            ))}
+          </div>
+          {data.confidence_notes&&(
+            <div style={{marginTop:14,fontSize:11,color:"var(--ink-3)",lineHeight:1.6}}>
+              <span style={{fontWeight:700,textTransform:"uppercase",fontSize:10,letterSpacing:".06em"}}>Confidence: </span>
+              {data.confidence_notes}
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
    APP PAGE
 ═══════════════════════════════════════════════════════════════ */
-const AppPage = ({user,onAnalyze,loading,result,onSave}) => (
-  <div style={{minHeight:"100vh",background:"var(--cream)",paddingTop:80}}>
-    <div style={{maxWidth:900,margin:"0 auto",padding:"44px clamp(16px,4vw,32px)"}}>
-      <div style={{marginBottom:28,animation:"fadeUp .6s both"}}>
-        <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:10}}>Workspace</div>
-        <h1 style={{fontWeight:800,fontSize:34,letterSpacing:"-.03em"}}>Analyze a Meal</h1>
-        <p style={{color:"var(--ink-2)",fontSize:14,marginTop:6}}>
-          {user?`Signed in as ${user.email} — analyses are saved.`:"Demo mode — sign in to save analyses."}
-        </p>
+const AppPage = ({user,onAnalyze,loading,result,onSave,onDietPoints,defaultTab}) => {
+  const [appTab,setAppTab]=useState(defaultTab||"meal"); // "meal" | "diet"
+  const [compareMode,setCompareMode]=useState(false);
+  const [result2,setResult2]=useState(null);
+  const [loading2,setLoading2]=useState(false);
+  const [cmpVerdict,setCmpVerdict]=useState(null);
+  const [cmpVLoading,setCmpVLoading]=useState(false);
+  // Diet check state
+  const [dietText,setDietText]=useState("");
+  const [dietGoal,setDietGoal]=useState("balance");
+  const [dietResult,setDietResult]=useState(null);
+  const [dietLoading,setDietLoading]=useState(false);
+  const [dietErr,setDietErr]=useState("");
+  const [dietPtsEarned,setDietPtsEarned]=useState(false);
+
+  const handleAnalyze2=async(input)=>{
+    if(!input.mealText?.trim()&&!input.imageData) return;
+    setLoading2(true);setCmpVerdict(null);
+    try {
+      const r=input.imageData ? await analyzeImageMeal(input) : await analyzeMeal(input);
+      setResult2(r);
+    } catch(e){ /* silently ignore */ }
+    finally { setLoading2(false); }
+  };
+
+  const generateCmpVerdict=async()=>{
+    if(!result||!result2) return;
+    setCmpVLoading(true);
+    try {
+      const v=await fetchCompare({analysisA:{result},analysisB:{result:result2},goal:"balance",restrictions:{tags:[]}});
+      setCmpVerdict(v);
+    } catch(e){ /* ignore */ }
+    finally { setCmpVLoading(false); }
+  };
+
+  const submitDiet=async()=>{
+    if(!dietText.trim()){setDietErr("Please describe what you eat in a day or week.");return;}
+    setDietErr("");setDietLoading(true);setDietResult(null);
+    try {
+      const r=await analyzeDiet({dietText:dietText.trim(),goal:dietGoal});
+      setDietResult(r);
+      if(!dietPtsEarned){setDietPtsEarned(true);onDietPoints&&onDietPoints();}
+    } catch(e){ setDietErr(e.message||"Analysis failed."); }
+    finally { setDietLoading(false); }
+  };
+
+  const isMeal=appTab==="meal";
+
+  return (
+    <div style={{minHeight:"100vh",background:"var(--cream)",paddingTop:80}}>
+      <div style={{maxWidth:compareMode&&isMeal?1200:900,margin:"0 auto",padding:"44px clamp(16px,4vw,32px)",transition:"max-width .4s var(--ease)"}}>
+
+        {/* Page header */}
+        <div style={{marginBottom:24,animation:"fadeUp .6s both"}}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:10}}>
+            {isMeal?"Workspace":"Diet Intelligence"}
+          </div>
+          <h1 style={{fontWeight:800,fontSize:34,letterSpacing:"-.03em"}}>
+            {isMeal?"Analyze a Meal":"Check My Full Diet"}
+          </h1>
+          <p style={{color:"var(--ink-2)",fontSize:14,marginTop:6}}>
+            {isMeal
+              ?(user?`Signed in as ${user.email} — analyses are saved.`:"Demo mode — sign in to save analyses.")
+              :"Drop your daily or weekly eating pattern. AI will score it, find gaps, and suggest real improvements."}
+          </p>
+        </div>
+
+        {/* Tab switcher */}
+        <div style={{display:"flex",gap:3,background:"var(--cream-d)",borderRadius:"var(--rad)",padding:3,
+          marginBottom:24,maxWidth:380,boxShadow:"inset 0 1px 3px rgba(0,0,0,.06)"}}>
+          {[{id:"meal",l:"🍽 Analyze a Meal"},{id:"diet",l:"📋 Check My Diet"}].map(t=>(
+            <button key={t.id} onClick={()=>setAppTab(t.id)}
+              style={{flex:1,padding:"9px 10px",borderRadius:10,border:"none",cursor:"pointer",
+                fontFamily:"var(--font)",fontSize:13,fontWeight:appTab===t.id?700:500,
+                background:appTab===t.id?"var(--white)":"transparent",
+                color:appTab===t.id?"var(--forest)":"var(--ink-2)",
+                boxShadow:appTab===t.id?"var(--sh-s)":"none",transition:"all .2s"}}>
+              {t.l}
+            </button>
+          ))}
+        </div>
+
+        {/* ── MEAL TAB ── */}
+        {isMeal&&(
+          <>
+            <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+              <button onClick={()=>{setCompareMode(c=>!c);setResult2(null);setCmpVerdict(null);}}
+                style={{fontFamily:"var(--font)",fontSize:13,fontWeight:600,padding:"9px 18px",
+                  border:`1.5px solid ${compareMode?"var(--forest-l)":"var(--cream-dd)"}`,borderRadius:"var(--rad-p)",
+                  background:compareMode?"var(--sage-2xl)":"transparent",
+                  color:compareMode?"var(--forest)":"var(--ink-2)",cursor:"pointer",transition:"all .2s",
+                  display:"inline-flex",alignItems:"center",gap:7}}>
+                <span>{compareMode?"✕":"⇄"}</span>
+                {compareMode?"Back to single meal":"Compare Meals"}
+              </button>
+            </div>
+
+            {compareMode?(
+              <div style={{animation:"fadeUp .4s both"}}>
+                <CompareMealInput
+                  onAnalyzeA={onAnalyze} onAnalyzeB={handleAnalyze2}
+                  loading={loading||loading2}/>
+                {(loading||loading2)&&!(result||result2)&&<div style={{marginTop:20}}><Skeleton/></div>}
+                {(result||result2)&&(
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,marginTop:24}}>
+                    <div>
+                      {loading&&!result?<Skeleton/>:result&&<ResultsView result={result} canSave={!!user} onSave={onSave} isDemo={!user}/>}
+                    </div>
+                    <div>
+                      {loading2&&!result2?<Skeleton/>:result2&&<ResultsView result={result2} canSave={false} isDemo/>}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ):(
+              <div style={{animation:"fadeUp .5s both"}}>
+                <MealInputCard onAnalyze={onAnalyze} loading={loading}/>
+                {loading&&!result&&<div style={{marginTop:20}}><Skeleton/></div>}
+                {result&&<div style={{marginTop:24}}><ResultsView result={result} canSave={!!user} onSave={onSave} isDemo={!user}/></div>}
+              </div>
+            )}
+            {compareMode&&result&&result2&&(
+              <div style={{marginTop:28,animation:"fadeUp .5s both"}}>
+                <Card style={{padding:24}}>
+                  <div style={{fontWeight:800,fontSize:18,marginBottom:4}}>Head-to-Head Comparison</div>
+                  <div style={{fontSize:13,color:"var(--ink-3)",marginBottom:16}}>
+                    <strong>{result.title}</strong> vs. <strong>{result2.title}</strong>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:16}}>
+                    {[{label:"Meal A",r:result,bg:"var(--cream)"},{label:"Meal B",r:result2,bg:"var(--sage-2xl)"}].map((s,i)=>(
+                      <div key={i} style={{background:s.bg,borderRadius:"var(--rad)",padding:14}}>
+                        <div style={{fontSize:10,fontWeight:700,color:i===1?"var(--forest)":"var(--ink-3)",
+                          letterSpacing:".07em",textTransform:"uppercase",marginBottom:4}}>{s.label}</div>
+                        <div style={{fontWeight:700,fontSize:14,marginBottom:10,color:i===1?"var(--forest)":"var(--ink)"}}>{s.r.title}</div>
+                        <NutrientRibbon nutrition={s.r.nutrition_estimate}/>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,marginTop:10}}>
+                          {[["Cal",s.r.nutrition_estimate?.calories,"kcal"],["Prot",s.r.nutrition_estimate?.protein_g,"g"],
+                            ["Carb",s.r.nutrition_estimate?.carbs_g,"g"],["Fat",s.r.nutrition_estimate?.fat_g,"g"]].map(([l,v,u])=>(
+                            <div key={l} style={{fontSize:12}}>
+                              <span style={{color:i===1?"var(--forest-m)":"var(--ink-3)"}}>{l}: </span>
+                              <span style={{fontWeight:700}}>{v!=null?`${v}${u}`:"—"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {!cmpVerdict&&(
+                    <div style={{textAlign:"center"}}>
+                      <Btn loading={cmpVLoading} onClick={generateCmpVerdict} variant="sage" style={{fontSize:13,padding:"10px 22px"}}>
+                        Generate AI Verdict
+                      </Btn>
+                    </div>
+                  )}
+                  {cmpVerdict&&(
+                    <div style={{animation:"fadeUp .4s both"}}>
+                      {cmpVerdict.verdict_title&&(
+                        <div style={{textAlign:"center",marginBottom:12}}>
+                          <div style={{display:"inline-flex",alignItems:"center",gap:8,background:"var(--forest)",
+                            color:"var(--white)",padding:"10px 22px",borderRadius:"var(--rad-p)",fontWeight:700,fontSize:14}}>
+                            ★ {cmpVerdict.verdict_title}
+                          </div>
+                        </div>
+                      )}
+                      {cmpVerdict.verdict_summary&&<div style={{fontSize:14,color:"var(--ink-2)",lineHeight:1.7,marginBottom:12}}>{cmpVerdict.verdict_summary}</div>}
+                      {(cmpVerdict.tradeoffs||[]).map((t,i)=>(
+                        <div key={i} style={{display:"flex",gap:8,marginBottom:7,fontSize:13}}>
+                          <span style={{color:"var(--sage)",fontWeight:700,flexShrink:0}}>·</span>
+                          <span style={{color:"var(--ink-2)"}}>{t}</span>
+                        </div>
+                      ))}
+                      {cmpVerdict.recommendation&&(
+                        <div style={{padding:"12px 16px",background:"var(--sage-2xl)",borderRadius:"var(--rad)",
+                          fontSize:14,color:"var(--forest)",fontWeight:600,lineHeight:1.65,marginTop:10}}>
+                          {cmpVerdict.recommendation}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── DIET CHECK TAB ── */}
+        {!isMeal&&(
+          <div style={{animation:"fadeUp .5s both"}}>
+            <Card style={{padding:28,marginBottom:16}}>
+              <FieldLabel>What do you typically eat in a day or week?</FieldLabel>
+              <textarea value={dietText} onChange={e=>{setDietText(e.target.value);setDietErr("");}}
+                placeholder={"Breakfast: 2 scrambled eggs, toast, coffee with milk.\nLunch: chicken wrap and fries.\nDinner: pasta bolognese.\nSnacks: chips, an apple, a Coke.\n\n(Describe your usual diet — the more detail, the better the analysis.)"}
+                rows={7}
+                style={{width:"100%",padding:"14px 16px",border:`1.5px solid ${dietErr?"var(--red-s)":"var(--cream-d)"}`,
+                  borderRadius:"var(--rad)",fontFamily:"var(--font)",fontSize:14,color:"var(--ink)",
+                  background:"var(--cream)",resize:"vertical",outline:"none",lineHeight:1.7,marginBottom:14}}
+                onFocus={e=>e.target.style.borderColor="var(--forest-l)"}
+                onBlur={e=>e.target.style.borderColor=dietErr?"var(--red-s)":"var(--cream-d)"}/>
+              <FieldLabel mt={2}>Your Goal</FieldLabel>
+              <div style={{display:"flex",gap:3,background:"var(--cream)",borderRadius:"var(--rad)",padding:3,
+                boxShadow:"inset 0 1px 3px rgba(0,0,0,.05)",marginBottom:18}}>
+                {GOALS.map(g=>(
+                  <button key={g.id} onClick={()=>setDietGoal(g.id)}
+                    style={{flex:1,padding:"8px 6px",borderRadius:10,border:"none",cursor:"pointer",
+                      fontFamily:"var(--font)",fontSize:12,fontWeight:dietGoal===g.id?700:500,
+                      background:dietGoal===g.id?"var(--white)":"transparent",
+                      color:dietGoal===g.id?"var(--forest)":"var(--ink-2)",
+                      boxShadow:dietGoal===g.id?"var(--sh-s)":"none",transition:"all .2s"}}>{g.label}</button>
+                ))}
+              </div>
+              {dietErr&&<div style={{fontSize:13,color:"var(--red-s)",fontWeight:500,marginBottom:10}}>{dietErr}</div>}
+              <Btn loading={dietLoading} onClick={submitDiet} style={{width:"100%",fontSize:15,padding:"15px",justifyContent:"center"}}>
+                {dietLoading?"AI is analyzing your diet…":"Analyze My Diet →"}
+              </Btn>
+              {!user&&<div style={{marginTop:10,fontSize:12,color:"var(--ink-3)",textAlign:"center"}}>Sign in to earn +20 pts for completing a diet check</div>}
+              {dietPtsEarned&&<div style={{marginTop:10,fontSize:13,color:"var(--forest-l)",fontWeight:700,textAlign:"center"}}>✓ +20 pts earned for your diet check!</div>}
+            </Card>
+            {dietLoading&&!dietResult&&<Skeleton/>}
+            {dietResult&&<DietCheckResults data={dietResult}/>}
+          </div>
+        )}
       </div>
-      <div style={{animation:"fadeUp .6s .1s both"}}>
-        <MealInputCard onAnalyze={onAnalyze} loading={loading}/>
-      </div>
-      {loading&&!result&&<div style={{marginTop:20}}><Skeleton/></div>}
-      {result&&<div style={{marginTop:24}}><ResultsView result={result} canSave={!!user} onSave={onSave} isDemo={!user}/></div>}
     </div>
-  </div>
-);
+  );
+};
 
 /* ═══════════════════════════════════════════════════════════════
    INSIGHTS PAGE  (Daily Pattern Intelligence)
 ═══════════════════════════════════════════════════════════════ */
-const InsightsPage = ({history,settings,showToast}) => {
+const InsightsPage = ({history,settings,showToast,onScoreBonus}) => {
   const [data,setData]=useState(null);
   const [loading,setLoading]=useState(false);
   const [done,setDone]=useState([]);
+  const bonusAwarded=useRef(false);
 
   useEffect(()=>{ try { const d = loadDone(); if(d && d.length) setDone(d); } catch{} },[]);
   const recent=history.slice(0,10);
@@ -1275,16 +2076,150 @@ const InsightsPage = ({history,settings,showToast}) => {
     </div>
   );
 
+  const weekAnalyses=getLastWeekAnalyses(history);
+  const healthScore=calculateHealthScore(weekAnalyses);
+  const weekAlerts=getWeeklyAlerts(weekAnalyses);
+
+  // Award +50 pts bonus once when weekly score is >= 80
+  useEffect(()=>{
+    if(healthScore&&healthScore.overall>=80&&!bonusAwarded.current&&onScoreBonus){
+      bonusAwarded.current=true;
+      onScoreBonus();
+    }
+  },[healthScore,onScoreBonus]);
+
   return (
     <div style={{minHeight:"100vh",background:"var(--cream)",paddingTop:80}}>
       <div style={{maxWidth:860,margin:"0 auto",padding:"44px clamp(16px,4vw,32px)"}}>
         <div style={{marginBottom:32}}>
           <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:10}}>
-            Daily Pattern Intelligence
+            Health Intelligence
           </div>
-          <h1 style={{fontWeight:800,fontSize:34,letterSpacing:"-.03em"}}>Your Insights</h1>
-          <p style={{color:"var(--ink-2)",fontSize:14,marginTop:6}}>Based on your last {recent.length} analyses.</p>
+          <h1 style={{fontWeight:800,fontSize:34,letterSpacing:"-.03em"}}>Your Health Dashboard</h1>
+          <p style={{color:"var(--ink-2)",fontSize:14,marginTop:6}}>Weekly score, leaderboard rank, and pattern intelligence.</p>
         </div>
+
+        {/* Leaderboard */}
+        {healthScore&&(
+          <Card style={{padding:24,marginBottom:16,animation:"fadeUp .5s both"}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:16}}>
+              Weekly Leaderboard
+            </div>
+            {(()=>{
+              const myScore=healthScore.overall;
+              const myTier=getDietTier(myScore);
+              const all=[...MOCK_FRIENDS,{name:"You",emoji:"⭐",score:myScore,isMe:true}]
+                .sort((a,b)=>b.score-a.score);
+              const myRank=all.findIndex(p=>p.isMe)+1;
+              return (
+                <div>
+                  <div style={{background:"var(--forest)",borderRadius:"var(--rad)",padding:"14px 20px",marginBottom:18,
+                    display:"flex",alignItems:"center",gap:14}}>
+                    <div style={{fontSize:28,lineHeight:1}}>🏆</div>
+                    <div>
+                      <div style={{fontWeight:800,fontSize:17,color:"var(--white)",lineHeight:1.2}}>
+                        You're ranked #{myRank} this week
+                      </div>
+                      <div style={{fontSize:12,color:"rgba(255,255,255,.62)",marginTop:3}}>
+                        Score: {myScore}/100 · {myTier.emoji} {myTier.label}
+                      </div>
+                    </div>
+                  </div>
+                  {all.map((p,i)=>{
+                    const t=getDietTier(p.score);
+                    return (
+                      <div key={p.name} style={{display:"flex",alignItems:"center",gap:12,marginBottom:9,
+                        padding:"11px 14px",borderRadius:"var(--rad)",
+                        background:p.isMe?"var(--sage-2xl)":"var(--white)",
+                        border:p.isMe?"1.5px solid var(--sage-l)":"1px solid var(--cream-d)"}}>
+                        <div style={{fontWeight:700,fontSize:12,color:"var(--ink-3)",width:22,textAlign:"center",flexShrink:0}}>#{i+1}</div>
+                        <div style={{fontSize:19,flexShrink:0}}>{p.emoji}</div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                            <span style={{fontWeight:p.isMe?800:600,fontSize:13,color:p.isMe?"var(--forest)":"var(--ink)"}}>{p.name}</span>
+                            {p.isMe&&<span style={{fontSize:10,background:"var(--sage)",color:"var(--white)",padding:"1px 8px",borderRadius:"var(--rad-p)",fontWeight:700}}>You</span>}
+                            <span style={{marginLeft:"auto",fontSize:11,fontWeight:700,color:t.color}}>{t.emoji} {t.label}</span>
+                          </div>
+                          <div style={{height:5,background:"var(--cream-d)",borderRadius:"var(--rad-p)",overflow:"hidden"}}>
+                            <div style={{height:"100%",width:`${p.score}%`,background:t.color,borderRadius:"var(--rad-p)",
+                              transition:"width .8s var(--ease)"}}/>
+                          </div>
+                        </div>
+                        <div style={{fontWeight:800,fontSize:15,color:t.color,flexShrink:0,minWidth:28,textAlign:"right"}}>{p.score}</div>
+                      </div>
+                    );
+                  })}
+                  <div style={{textAlign:"center",marginTop:14}}>
+                    <Btn variant="ghost" style={{fontSize:12,padding:"7px 18px"}}>+ Invite Friends</Btn>
+                  </div>
+                </div>
+              );
+            })()}
+          </Card>
+        )}
+
+        {/* Score breakdown */}
+        {healthScore&&(
+          <Card style={{padding:24,marginBottom:16,animation:"fadeUp .5s .1s both"}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:16}}>
+              Score Breakdown — This Week
+            </div>
+            <div style={{display:"flex",gap:20,alignItems:"center",flexWrap:"wrap"}}>
+              <div style={{textAlign:"center",flexShrink:0}}>
+                <div style={{position:"relative",width:84,height:84,margin:"0 auto"}}>
+                  <svg width="84" height="84" viewBox="0 0 84 84" style={{transform:"rotate(-90deg)"}}>
+                    <circle cx="42" cy="42" r="34" fill="none" stroke="var(--cream-d)" strokeWidth="7"/>
+                    <circle cx="42" cy="42" r="34" fill="none"
+                      stroke={healthScore.overall>=70?"var(--forest-l)":healthScore.overall>=40?"var(--amber)":"var(--red-s)"}
+                      strokeWidth="7" strokeLinecap="round"
+                      strokeDasharray={`${healthScore.overall*2.136} 213.6`}
+                      style={{transition:"stroke-dasharray .8s var(--ease)"}}/>
+                  </svg>
+                  <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+                    <div style={{fontWeight:800,fontSize:20,color:"var(--forest)",lineHeight:1}}>{healthScore.overall}</div>
+                    <div style={{fontSize:9,color:"var(--ink-3)",fontWeight:600,textTransform:"uppercase",letterSpacing:".04em"}}>/100</div>
+                  </div>
+                </div>
+                <div style={{fontSize:10,fontWeight:600,color:"var(--ink-3)",marginTop:5}}>
+                  {getDietTier(healthScore.overall).emoji} {getDietTier(healthScore.overall).label}
+                </div>
+              </div>
+              <div style={{flex:1,minWidth:180}}>
+                {[["Sodium",healthScore.sodium,"var(--sage)"],["Sugar",healthScore.sugar,"var(--forest-l)"],
+                  ["Fiber",healthScore.fiber,"var(--forest)"],["Protein",healthScore.protein,"var(--sage-l)"],
+                  ["Variety",healthScore.variety,"var(--ink-3)"],["Calorie",healthScore.calorie,"var(--sage)"]].map(([label,val,color])=>(
+                  <div key={label} style={{marginBottom:7}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:2}}>
+                      <span style={{color:"var(--ink-2)",fontWeight:500}}>{label}</span>
+                      <span style={{fontWeight:700,color}}>{val}pt</span>
+                    </div>
+                    <div style={{height:4,background:"var(--cream-d)",borderRadius:"var(--rad-p)",overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${Math.min(val*4,100)}%`,background:color,borderRadius:"var(--rad-p)",
+                        animation:"barGrow .75s var(--ease) both"}}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {weekAlerts.length>0&&(
+                <div style={{background:"var(--amber-l)",borderRadius:"var(--rad)",padding:"12px 14px",minWidth:150,maxWidth:200}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"var(--amber)",marginBottom:7,textTransform:"uppercase",letterSpacing:".06em"}}>
+                    Watch This Week
+                  </div>
+                  {weekAlerts.map((a,i)=>(
+                    <div key={i} style={{fontSize:11,color:"var(--ink-2)",marginBottom:5,display:"flex",gap:5,alignItems:"flex-start"}}>
+                      <span>{a.emoji}</span>
+                      <span><strong>{a.isLow?"Low":"High"} {a.nutrient}</strong> — {a.avg}{a.unit}/meal</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{marginTop:12,fontSize:12,color:"var(--ink-3)",borderTop:"1px solid var(--cream-d)",paddingTop:10}}>
+              Based on <strong>{healthScore.count}</strong> meal{healthScore.count!==1?"s":""} in the last 7 days.
+              {" "}Earn ⭐ points by saving meals and keeping nutrients in check.
+            </div>
+          </Card>
+        )}
 
         {loading&&(
           <Card style={{padding:28}}>
@@ -1427,13 +2362,21 @@ const InsightsPage = ({history,settings,showToast}) => {
 /* ═══════════════════════════════════════════════════════════════
    HISTORY PAGE
 ═══════════════════════════════════════════════════════════════ */
-const HistoryPage = ({history,setHistory,onView,showToast}) => {
+const HistoryPage = ({history,setHistory,onView,showToast,settings}) => {
   const [q,setQ]=useState("");
   const [fg,setFg]=useState("all");
   const [cmpA,setCmpA]=useState(null);
   const [cmpB,setCmpB]=useState(null);
   const [verdict,setVerdict]=useState(null);
   const [vLoading,setVLoading]=useState(false);
+  const [alertsDismissed,setAlertsDismissed]=useState(false);
+  const [suggestion,setSuggestion]=useState(null);
+  const [suggLoading,setSuggLoading]=useState(false);
+  const [suggOpen,setSuggOpen]=useState(false);
+
+  const weekAnalyses=getLastWeekAnalyses(history);
+  const weekAlerts=getWeeklyAlerts(weekAnalyses);
+  const showAlertBanner=!alertsDismissed&&weekAlerts.length>0;
 
   const filtered=history.filter(a=>{
     const ms=!q||a.result.title.toLowerCase().includes(q.toLowerCase());
@@ -1462,13 +2405,79 @@ const HistoryPage = ({history,setHistory,onView,showToast}) => {
     finally { setVLoading(false); }
   };
 
+  const getSuggestion=async()=>{
+    setSuggLoading(true);setSuggOpen(true);
+    try {
+      const s=await fetchWeeklySuggestion(weekAlerts,settings?.goal||"balance");
+      setSuggestion(s);
+    } catch(e){ showToast(e.message||"Suggestion failed."); }
+    finally { setSuggLoading(false); }
+  };
+
   return (
     <div style={{minHeight:"100vh",background:"var(--cream)",paddingTop:80}}>
       <div style={{maxWidth:1000,margin:"0 auto",padding:"44px clamp(16px,4vw,32px)"}}>
         <div style={{marginBottom:28}}>
-          <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:10}}>Your Record</div>
-          <h1 style={{fontWeight:800,fontSize:34,letterSpacing:"-.03em"}}>History</h1>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--sage)",letterSpacing:".12em",textTransform:"uppercase",marginBottom:10}}>What You've Eaten</div>
+          <h1 style={{fontWeight:800,fontSize:34,letterSpacing:"-.03em"}}>Meal Log</h1>
         </div>
+
+        {/* Weekly alert banner */}
+        {showAlertBanner&&(
+          <div style={{marginBottom:20,background:"var(--amber-l)",borderRadius:"var(--rad)",padding:"16px 20px",
+            border:"1.5px solid rgba(212,136,26,.2)",animation:"fadeUp .5s both"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:14,color:"var(--amber)",marginBottom:4}}>
+                  ⚠ Last 7 days — heads up
+                </div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {weekAlerts.map((a,i)=>(
+                    <span key={i} style={{fontSize:12,background:"rgba(212,136,26,.15)",color:"var(--amber)",
+                      padding:"3px 10px",borderRadius:"var(--rad-p)",fontWeight:600}}>
+                      {a.emoji} {a.isLow?"Low":"High"} {a.nutrient}: avg {a.avg}{a.unit}/meal
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <button onClick={()=>setAlertsDismissed(true)}
+                style={{background:"none",border:"none",cursor:"pointer",color:"var(--ink-3)",fontSize:18,lineHeight:1,flexShrink:0}}>×</button>
+            </div>
+            <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+              <Btn onClick={getSuggestion} loading={suggLoading} variant="ghost"
+                style={{fontSize:12,padding:"7px 16px",border:"1.5px solid rgba(212,136,26,.35)",color:"var(--amber)"}}>
+                Get Meal Suggestion
+              </Btn>
+              {weekAlerts.slice(0,1).map((a,i)=>(
+                <span key={i} style={{fontSize:12,color:"var(--ink-2)",lineHeight:1.5}}>{a.tip}</span>
+              ))}
+            </div>
+            {suggOpen&&(
+              <div style={{marginTop:14,padding:"14px 16px",background:"var(--white)",borderRadius:"var(--rad)",
+                border:"1px solid var(--cream-d)"}}>
+                {suggLoading?(
+                  <div style={{display:"flex",alignItems:"center",gap:8,color:"var(--ink-2)",fontSize:13}}>
+                    <Spinner size={14} color="var(--amber)"/>Getting AI suggestion…
+                  </div>
+                ):suggestion?(
+                  <div>
+                    <div style={{fontWeight:700,fontSize:14,color:"var(--forest)",marginBottom:4}}>{suggestion.headline}</div>
+                    <div style={{fontWeight:800,fontSize:16,marginBottom:6}}>Try: {suggestion.suggestion_meal}</div>
+                    <div style={{fontSize:13,color:"var(--ink-2)",lineHeight:1.65,marginBottom:8}}>{suggestion.why}</div>
+                    {(suggestion.nutrients_it_balances||[]).length>0&&(
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                        {suggestion.nutrients_it_balances.map((n,i)=>(
+                          <span key={i} style={{fontSize:11,background:"var(--sage-2xl)",color:"var(--forest-l)",
+                            padding:"3px 10px",borderRadius:"var(--rad-p)",fontWeight:600}}>✓ {n}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ):null}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Filters */}
         <div style={{display:"flex",gap:10,marginBottom:24,flexWrap:"wrap"}}>
@@ -1584,7 +2593,7 @@ const HistoryPage = ({history,setHistory,onView,showToast}) => {
               {q?"No matching analyses":"No analyses yet"}
             </div>
             <div style={{fontSize:13,color:"var(--ink-3)"}}>
-              {q?"Try a different search.":"Analyze a meal to build your history."}
+              {q?"Try a different search.":"Analyze and save a meal to build your log."}
             </div>
           </div>
         ):(
@@ -1643,6 +2652,177 @@ const SettingsPage = ({user,settings,onSave}) => {
             {saved?"✓ Saved!":"Save Settings"}
           </Btn>
         </Card>
+      </div>
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   FRIENDS PAGE
+═══════════════════════════════════════════════════════════════ */
+const FriendsPage = ({history, user, points}) => {
+  const weekAnalyses = getLastWeekAnalyses(history);
+  const healthScore  = calculateHealthScore(weekAnalyses);
+  const userScore    = healthScore ? healthScore.overall : (history.length > 0 ? 15 : 0);
+  const userMeals    = history.length;
+  const userStreak   = weekAnalyses.length;
+  const myTier       = getDietTier(userScore);
+
+  const all = [
+    ...MOCK_FRIENDS,
+    {name: user?.name || "You", emoji:"⭐", score: userScore, meals: userMeals, streak: userStreak,
+     lastActivity: userMeals > 0 ? "logged a meal this week" : "hasn't logged meals yet",
+     activityTime:"just now", pts:"+"+points, isMe: true},
+  ].sort((a,b) => b.score - a.score);
+  const myRank = all.findIndex(f => f.isMe) + 1;
+
+  return (
+    <div style={{minHeight:"100vh", background:"var(--cream)", paddingTop:62}}>
+
+      {/* Dark header band */}
+      <div style={{background:"var(--forest)", padding:"44px clamp(16px,5vw,52px) 56px"}}>
+        <div style={{maxWidth:760, margin:"0 auto"}}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--sage-l)",letterSpacing:".13em",textTransform:"uppercase",marginBottom:10}}>
+            Social Competition
+          </div>
+          <h1 style={{fontWeight:800,fontSize:"clamp(28px,4vw,40px)",color:"var(--white)",letterSpacing:"-.03em",marginBottom:6,lineHeight:1.1}}>
+            Friends Leaderboard
+          </h1>
+          <p style={{color:"rgba(255,255,255,.55)",fontSize:14,marginBottom:28}}>
+            Weekly health scores. The better you eat, the higher you climb.
+          </p>
+          {/* My rank card */}
+          <div style={{display:"inline-flex",alignItems:"center",gap:16,background:"rgba(255,255,255,.09)",
+            borderRadius:"var(--rad-l)",padding:"16px 22px",backdropFilter:"blur(12px)",
+            border:"1px solid rgba(255,255,255,.1)"}}>
+            <div style={{fontSize:32,lineHeight:1}}>🏆</div>
+            <div>
+              <div style={{fontWeight:800,fontSize:18,color:"var(--white)",lineHeight:1.15}}>
+                You're ranked #{myRank} this week
+              </div>
+              <div style={{fontSize:12,color:"rgba(255,255,255,.55)",marginTop:4}}>
+                Score {userScore}/100 · {myTier.emoji} {myTier.label} · {userMeals} meal{userMeals!==1?"s":""} logged
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{maxWidth:760,margin:"0 auto",padding:"0 clamp(16px,4vw,32px) 52px",marginTop:-24}}>
+
+        {/* Leaderboard card */}
+        <Card style={{padding:0,overflow:"hidden",marginBottom:20,boxShadow:"var(--sh-m)"}}>
+          {/* Table header */}
+          <div style={{display:"grid",gridTemplateColumns:"48px 1fr auto",gap:0,
+            padding:"10px 20px",background:"var(--cream-d)",
+            fontSize:10,fontWeight:700,color:"var(--ink-3)",letterSpacing:".1em",textTransform:"uppercase"}}>
+            <div style={{textAlign:"center"}}>Rank</div>
+            <div style={{paddingLeft:52}}>Player</div>
+            <div>Score</div>
+          </div>
+
+          {all.map((f, i) => {
+            const t = getDietTier(f.score);
+            const medals = ["🥇","🥈","🥉"];
+            return (
+              <div key={f.name} style={{
+                display:"flex",alignItems:"center",gap:0,
+                padding:"14px 20px",
+                background: f.isMe ? "var(--forest)" : i%2===0 ? "var(--white)" : "var(--cream)",
+                borderBottom:"1px solid var(--cream-d)",
+                transition:"all .15s",
+                animation:`fadeUp .4s ${i*.06}s both`}}
+                onMouseEnter={e=>{ if(!f.isMe) e.currentTarget.style.background="var(--sage-2xl)"; }}
+                onMouseLeave={e=>{ if(!f.isMe) e.currentTarget.style.background=i%2===0?"var(--white)":"var(--cream)"; }}>
+                {/* Rank */}
+                <div style={{width:48,textAlign:"center",flexShrink:0,fontSize:18}}>
+                  {i<3 ? medals[i] : <span style={{fontWeight:700,fontSize:13,color:f.isMe?"rgba(255,255,255,.45)":"var(--ink-3)"}}>#{i+1}</span>}
+                </div>
+                {/* Avatar */}
+                <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,
+                  background:f.isMe?"rgba(255,255,255,.14)":"var(--sage-2xl)",
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:20,marginRight:14}}>
+                  {f.emoji}
+                </div>
+                {/* Name + bar */}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                    <span style={{fontWeight:700,fontSize:14,color:f.isMe?"var(--white)":"var(--ink)"}}>
+                      {f.name}
+                    </span>
+                    {f.isMe&&(
+                      <span style={{fontSize:10,background:"var(--sage)",color:"var(--white)",
+                        padding:"2px 8px",borderRadius:"var(--rad-p)",fontWeight:700}}>You</span>
+                    )}
+                    <span style={{marginLeft:"auto",fontSize:11,fontWeight:700,
+                      color:f.isMe?"var(--sage-l)":t.color}}>
+                      {t.emoji} {t.label}
+                    </span>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{flex:1,height:5,background:f.isMe?"rgba(255,255,255,.15)":"var(--cream-d)",
+                      borderRadius:"var(--rad-p)",overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${f.score}%`,
+                        background:f.isMe?"var(--sage-l)":t.color,
+                        borderRadius:"var(--rad-p)",transition:"width .9s var(--ease)"}}/>
+                    </div>
+                    <span style={{fontSize:11,color:f.isMe?"rgba(255,255,255,.4)":"var(--ink-3)",
+                      flexShrink:0,minWidth:60}}>
+                      {f.meals} meal{f.meals!==1?"s":""} · {f.streak}d streak
+                    </span>
+                  </div>
+                </div>
+                {/* Score */}
+                <div style={{fontWeight:800,fontSize:22,
+                  color:f.isMe?"var(--white)":t.color,
+                  flexShrink:0,minWidth:46,textAlign:"right",marginLeft:12}}>
+                  {f.score}
+                </div>
+              </div>
+            );
+          })}
+
+          <div style={{padding:"16px 20px",background:"var(--cream)",textAlign:"center"}}>
+            <Btn variant="ghost" style={{fontSize:13,padding:"8px 22px"}}>
+              + Invite a Friend
+            </Btn>
+          </div>
+        </Card>
+
+        {/* Activity feed */}
+        <div style={{marginBottom:8}}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--ink-3)",letterSpacing:".1em",
+            textTransform:"uppercase",marginBottom:14,paddingLeft:2}}>
+            Recent Activity
+          </div>
+          <Card style={{padding:0,overflow:"hidden"}}>
+            {[...MOCK_FRIENDS].map((f,i)=>(
+              <div key={f.name} style={{display:"flex",alignItems:"center",gap:14,padding:"14px 20px",
+                borderBottom:i<MOCK_FRIENDS.length-1?"1px solid var(--cream-d)":"none",
+                background:"var(--white)"}}>
+                <div style={{width:36,height:36,borderRadius:"50%",background:"var(--sage-2xl)",
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:18,flexShrink:0}}>
+                  {f.emoji}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <span style={{fontWeight:600,fontSize:13,color:"var(--ink)"}}>{f.name}</span>
+                  <span style={{fontSize:13,color:"var(--ink-2)"}}> {f.lastActivity}</span>
+                </div>
+                <div style={{fontSize:11,color:"var(--ink-3)",flexShrink:0}}>{f.activityTime}</div>
+                <div style={{fontSize:11,fontWeight:700,color:"var(--amber)",background:"var(--amber-l)",
+                  padding:"3px 10px",borderRadius:"var(--rad-p)",flexShrink:0}}>{f.pts}</div>
+              </div>
+            ))}
+          </Card>
+        </div>
+
+        {/* Score tip */}
+        <div style={{marginTop:20,padding:"14px 18px",background:"var(--sage-2xl)",borderRadius:"var(--rad)",
+          fontSize:13,color:"var(--forest)",lineHeight:1.65}}>
+          <strong>Tip:</strong> Log meals and complete diet checks to improve your score and climb the leaderboard. Score updates every week.
+        </div>
       </div>
     </div>
   );
@@ -1741,28 +2921,44 @@ const Gate = ({label,setPage}) => (
    ROOT APP
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
-  const [page,    setPage]    = useState("home");
-  const [user,    setUser]    = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [result,  setResult]  = useState(null);
-  const [homeRes, setHomeRes] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [settings,setSettings]= useState({goal:"balance",restrictions:{tags:[]},name:""});
-  const [toast,   setToast]   = useState(null);
+  const [page,      setPage]      = useState("home");
+  const [user,      setUser]      = useState(null);
+  const [loading,   setLoading]   = useState(false);
+  const [result,    setResult]    = useState(null);
+  const [homeRes,   setHomeRes]   = useState(null);
+  const [homeRes2,  setHomeRes2]  = useState(null);
+  const [homeLd2,   setHomeLd2]   = useState(false);
+  const [history,   setHistory]   = useState([]);
+  const [settings,  setSettings]  = useState({goal:"balance",restrictions:{tags:[]},name:""});
+  const [toast,     setToast]     = useState(null);
+  const [points,    setPoints]    = useState(0);
 
   const showToast = useCallback(msg=>{setToast(msg);setTimeout(()=>setToast(null),5000);},[]);
 
-  // load history from localStorage on client to avoid SSR/CSR markup mismatch
-  useEffect(()=>{ try { const h = loadHistory(); if(h && h.length) setHistory(h); } catch{} },[]);
+  // load history + points from localStorage
+  useEffect(()=>{
+    try { const h = loadHistory(); if(h && h.length) setHistory(h); } catch{}
+    try { const p = loadPoints(); setPoints(p.total||0); } catch{}
+  },[]);
 
   const handleAnalyze = useCallback(async(input,isHome=false)=>{
-    if(!input.mealText.trim()) return;
+    if(!input.mealText?.trim()&&!input.imageData) return;
     setLoading(true);
     try {
-      const r=await analyzeMeal(input);
+      const r=input.imageData ? await analyzeImageMeal(input) : await analyzeMeal(input);
       if(isHome) setHomeRes(r); else setResult(r);
     } catch(e){ showToast(e.message||"Analysis failed. Please try again."); }
     finally { setLoading(false); }
+  },[showToast]);
+
+  const handleAnalyzeHome2 = useCallback(async(input)=>{
+    if(!input.mealText?.trim()&&!input.imageData) return;
+    setHomeLd2(true);
+    try {
+      const r=input.imageData ? await analyzeImageMeal(input) : await analyzeMeal(input);
+      setHomeRes2(r);
+    } catch(e){ showToast(e.message||"Analysis failed. Please try again."); }
+    finally { setHomeLd2(false); }
   },[showToast]);
 
   const handleSave = useCallback(()=>{
@@ -1773,28 +2969,59 @@ export default function App() {
       result,created_at:new Date().toISOString()};
     const next=[entry,...history];
     setHistory(next); saveHistory(next);
+    // Award points: 10 per save
+    const pts=loadPoints();
+    const newTotal=(pts.total||0)+10;
+    const newPts={...pts,total:newTotal};
+    // Bonus: 25 pts for 5+ meals in last 7 days
+    const weekCount=getLastWeekAnalyses(next).length;
+    if(weekCount===5){ newPts.total+=25; newPts.badges=[...(pts.badges||[]),"5-meal week"]; }
+    savePoints(newPts);
+    setPoints(newPts.total);
   },[result,user,settings,history]);
+
+  const handleDietPoints = useCallback(()=>{
+    const pts=loadPoints();
+    const newTotal=(pts.total||0)+20;
+    const newPts={...pts,total:newTotal};
+    savePoints(newPts);
+    setPoints(newTotal);
+    showToast("🥗 +20 pts for completing a diet check!");
+  },[showToast]);
+
+  const handleScoreBonus = useCallback(()=>{
+    const pts=loadPoints();
+    const newTotal=(pts.total||0)+50;
+    const newPts={...pts,total:newTotal};
+    savePoints(newPts);
+    setPoints(newTotal);
+    showToast("🏆 +50 pts — your weekly score is 80 or above!");
+  },[showToast]);
 
   const handleAuth=async(mode,email,pw,name)=>{
     await new Promise(r=>setTimeout(r,800));
     const u={id:"u_"+Math.random().toString(36).slice(2),email,name};
     setUser(u);
     setSettings(s=>({...s,name:name||email.split("@")[0]}));
-    setPage("app");
+    setPage("home");
   };
 
   return (
     <div>
       <Styles/>
-      <Nav page={page} setPage={setPage} user={user}
+      <Nav page={page} setPage={setPage} user={user} points={points}
         onLogout={()=>{setUser(null);setPage("home");}}/>
 
-      {page==="home"     && <HomePage setPage={setPage} onAnalyze={v=>handleAnalyze(v,true)} loading={loading} result={homeRes}/>}
-      {page==="app"      && <AppPage user={user} onAnalyze={v=>handleAnalyze(v,false)} loading={loading} result={result} onSave={handleSave}/>}
+      {page==="home"     && <HomePage setPage={setPage}
+          onAnalyze={v=>handleAnalyze(v,true)} loading={loading} result={homeRes}
+          onAnalyze2={handleAnalyzeHome2} loading2={homeLd2} result2={homeRes2}/>}
+      {(page==="app"||page==="app:diet") && <AppPage key={page==="app:diet"?"diet":"meal"} user={user} onAnalyze={v=>handleAnalyze(v,false)} loading={loading} result={result} onSave={handleSave}
+          onDietPoints={handleDietPoints} defaultTab={page==="app:diet"?"diet":"meal"}/>}
       {page==="history"  && (user?<HistoryPage history={history} setHistory={setHistory} showToast={showToast}
-          onView={item=>{setResult(item.result);setPage("app");}}/>:<Gate label="history" setPage={setPage}/>)}
-      {page==="insights" && (user?<InsightsPage history={history} settings={settings} showToast={showToast}/>:<Gate label="insights" setPage={setPage}/>)}
-      {page==="settings" && (user?<SettingsPage user={user} settings={settings} onSave={s=>setSettings(s)}/>:<Gate label="settings" setPage={setPage}/>)}
+          settings={settings} onView={item=>{setResult(item.result);setPage("app");}}/>:<Gate label="meal log" setPage={setPage}/>)}
+      {page==="friends"  && (user?<FriendsPage history={history} user={user} points={points}/>:<Gate label="friends leaderboard" setPage={setPage}/>)}
+      {page==="insights" && (user?<InsightsPage history={history} settings={settings} showToast={showToast} onScoreBonus={handleScoreBonus}/>:<Gate label="insights" setPage={setPage}/>)}
+      {/* Settings removed — preferences handled inline */}
       {page==="auth"     && <AuthPage onAuth={handleAuth} setPage={setPage}/>}
 
       {toast&&<Toast message={toast} onClose={()=>setToast(null)}/>}
